@@ -1,0 +1,1184 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Разбор трейса — AIAD_CHAT</title>
+<style>
+:root{
+  --ground:#E9EAE5;
+  --paper:#F6F6F2;
+  --paper-2:#FDFDFB;
+  --ink:#16181A;
+  --ink-soft:#4A4E4B;
+  --muted:#797D78;
+  --rule:#C9CBC4;
+  --rule-soft:#DEDFD9;
+  --navy:#1B3A5C;
+  --crimson:#A3003F;
+  --forest:#2A6249;
+  --amber:#7E6210;
+  --violet:#4B3A78;
+  --serif:Georgia,"Iowan Old Style","Times New Roman",serif;
+  --sans:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;
+  --mono:ui-monospace,"SF Mono","Cascadia Mono","JetBrains Mono",Menlo,Consolas,monospace;
+}
+*{box-sizing:border-box}
+html,body{margin:0;padding:0}
+body{
+  background:var(--ground);
+  color:var(--ink);
+  font-family:var(--sans);
+  font-size:15px;
+  line-height:1.5;
+  -webkit-font-smoothing:antialiased;
+}
+.wrap{max-width:1180px;margin:0 auto;padding:28px 22px 90px}
+
+/* ---------- masthead ---------- */
+.masthead{
+  border-bottom:2px solid var(--ink);
+  padding-bottom:12px;margin-bottom:22px;
+  display:flex;align-items:baseline;gap:14px;flex-wrap:wrap;
+}
+.masthead h1{
+  font-family:var(--serif);font-weight:400;font-size:27px;
+  letter-spacing:-.2px;margin:0;
+}
+.masthead .sub{
+  font-size:11.5px;text-transform:uppercase;letter-spacing:.13em;
+  color:var(--muted);
+}
+
+/* ---------- dropzone ---------- */
+.drop{
+  border:1.5px dashed var(--rule);
+  background:var(--paper);
+  border-radius:3px;
+  padding:34px 24px;
+  text-align:center;
+  transition:border-color .15s,background .15s;
+  cursor:pointer;
+}
+.drop:hover,.drop.hot{border-color:var(--crimson);background:var(--paper-2)}
+.drop.hot{border-style:solid}
+.drop h2{font-family:var(--serif);font-weight:400;font-size:20px;margin:0 0 6px}
+.drop p{margin:0;color:var(--muted);font-size:13.5px}
+.drop code{font-family:var(--mono);font-size:12.5px;color:var(--navy)}
+.drop input{display:none}
+
+/* ---------- file strip ---------- */
+.files{margin-top:14px;display:flex;flex-wrap:wrap;gap:7px;align-items:center}
+.file-chip{
+  font-family:var(--mono);font-size:11.5px;
+  background:var(--paper-2);border:1px solid var(--rule-soft);
+  border-radius:2px;padding:4px 8px;color:var(--ink-soft);
+  display:flex;gap:7px;align-items:center;
+}
+.file-chip b{color:var(--navy);font-weight:600}
+.file-chip .ord{
+  background:var(--navy);color:#fff;border-radius:2px;
+  padding:0 4px;font-size:10px;font-weight:600;
+}
+.file-chip.bad{border-color:var(--crimson);color:var(--crimson)}
+.reset{
+  font:inherit;font-size:12px;background:none;border:1px solid var(--rule);
+  border-radius:2px;padding:4px 10px;cursor:pointer;color:var(--ink-soft);
+}
+.reset:hover{border-color:var(--ink);color:var(--ink)}
+
+/* ---------- trace tabs ---------- */
+.tabs{display:flex;flex-wrap:wrap;gap:0;margin:26px 0 0;border-bottom:1px solid var(--rule)}
+.tab{
+  font-family:var(--mono);font-size:12px;
+  background:none;border:1px solid transparent;border-bottom:none;
+  padding:7px 13px;cursor:pointer;color:var(--muted);border-radius:2px 2px 0 0;
+}
+.tab[aria-selected="true"]{
+  background:var(--paper-2);border-color:var(--rule);
+  color:var(--ink);margin-bottom:-1px;
+}
+
+/* ---------- dossier ---------- */
+.dossier{margin-top:26px}
+.eyebrow{
+  font-size:10.5px;text-transform:uppercase;letter-spacing:.15em;
+  color:var(--muted);margin-bottom:9px;
+}
+.question{
+  font-family:var(--serif);font-size:30px;line-height:1.25;
+  margin:0 0 16px;font-weight:400;letter-spacing:-.3px;
+}
+.question .q-mark{color:var(--rule);font-size:34px;vertical-align:-2px}
+.idbar{
+  display:flex;flex-wrap:wrap;gap:0;
+  border:1px solid var(--rule);border-radius:3px;background:var(--paper-2);
+  overflow:hidden;
+}
+.idcell{
+  padding:9px 14px;border-right:1px solid var(--rule-soft);
+  min-width:0;flex:1 1 auto;
+}
+.idcell:last-child{border-right:none}
+.idcell dt{
+  font-size:10px;text-transform:uppercase;letter-spacing:.11em;
+  color:var(--muted);margin:0 0 2px;
+}
+.idcell dd{
+  margin:0;font-family:var(--mono);font-size:12.5px;
+  color:var(--ink);word-break:break-all;
+}
+
+/* ---------- verdict ---------- */
+.verdict{margin-top:22px;border:1px solid var(--rule);border-radius:3px;background:var(--paper-2)}
+.verdict-head{
+  padding:10px 15px;border-bottom:1px solid var(--rule-soft);
+  font-size:10.5px;text-transform:uppercase;letter-spacing:.15em;color:var(--muted);
+}
+.finding{
+  display:flex;gap:12px;padding:11px 15px;
+  border-bottom:1px solid var(--rule-soft);font-size:14px;
+}
+.finding:last-child{border-bottom:none}
+.finding .dot{
+  flex:0 0 auto;width:7px;height:7px;border-radius:50%;margin-top:7px;
+}
+.finding.warn .dot{background:var(--crimson)}
+.finding.ok .dot{background:var(--forest)}
+.finding.note .dot{background:var(--navy)}
+.finding b{font-weight:600}
+.finding code{font-family:var(--mono);font-size:12.5px;background:var(--ground);padding:1px 4px;border-radius:2px}
+
+/* ---------- stats ---------- */
+.stats{display:flex;flex-wrap:wrap;gap:10px;margin-top:16px}
+.stat{
+  flex:1 1 130px;border:1px solid var(--rule);border-radius:3px;
+  background:var(--paper-2);padding:11px 14px;
+}
+.stat .v{font-family:var(--serif);font-size:25px;line-height:1.1}
+.stat .k{font-size:10.5px;text-transform:uppercase;letter-spacing:.11em;color:var(--muted);margin-top:3px}
+.stat.hl .v{color:var(--crimson)}
+
+/* ---------- section ---------- */
+.section{margin-top:38px}
+.section-head{
+  display:flex;align-items:baseline;gap:12px;
+  border-bottom:1px solid var(--ink);padding-bottom:7px;margin-bottom:4px;
+}
+.section-head h2{font-family:var(--serif);font-weight:400;font-size:21px;margin:0}
+.section-head .hint{font-size:12px;color:var(--muted)}
+
+/* ---------- spine ---------- */
+.spine{position:relative}
+.row{
+  display:grid;
+  grid-template-columns:58px 1fr 190px;
+  gap:0;
+  border-bottom:1px solid var(--rule-soft);
+  align-items:start;
+}
+.row:hover{background:var(--paper)}
+.row.minor .title,.row.minor .chip{opacity:.62}
+.row .clock{
+  font-family:var(--mono);font-size:11.5px;color:var(--muted);
+  padding:13px 8px 13px 0;text-align:right;white-space:nowrap;
+}
+.row .body{padding:11px 14px 12px 0;min-width:0;position:relative}
+.row .track{padding:15px 0 13px;position:relative}
+
+/* depth guides */
+.body{--ind:0px}
+.body>.inner{margin-left:var(--ind);position:relative}
+.body>.inner::before{
+  content:"";position:absolute;left:-13px;top:8px;width:9px;height:1px;background:var(--rule);
+}
+.body.d0>.inner::before{display:none}
+
+.chip{
+  display:inline-block;font-family:var(--mono);font-size:9.5px;font-weight:600;
+  letter-spacing:.09em;text-transform:uppercase;
+  padding:2px 6px;border-radius:2px;border:1px solid;vertical-align:1px;
+  margin-right:9px;white-space:nowrap;
+}
+.c-user{color:var(--ink);border-color:var(--ink)}
+.c-llm{color:var(--violet);border-color:var(--violet)}
+.c-sub{color:var(--navy);border-color:var(--navy)}
+.c-mcp{color:var(--crimson);border-color:var(--crimson);background:#fdeef3}
+.c-rag{color:var(--forest);border-color:var(--forest)}
+.c-ans{color:#fff;border-color:var(--ink);background:var(--ink)}
+.c-err{color:#fff;border-color:var(--crimson);background:var(--crimson)}
+.c-sys{color:var(--muted);border-color:var(--rule)}
+
+.title{font-size:14.5px;font-weight:600;display:inline}
+.title .name{font-family:var(--mono);font-size:13.5px;font-weight:600}
+.meta{font-size:12.5px;color:var(--muted);margin-top:3px}
+.meta b{color:var(--ink-soft);font-weight:600}
+.quote{
+  font-family:var(--serif);font-size:15px;line-height:1.55;
+  margin-top:7px;padding-left:12px;border-left:2px solid var(--rule);
+  color:var(--ink-soft);white-space:pre-wrap;
+}
+.quote.full{color:var(--ink)}
+
+details.pay{margin-top:7px}
+details.pay>summary{
+  cursor:pointer;font-family:var(--mono);font-size:11.5px;color:var(--navy);
+  list-style:none;display:inline-flex;align-items:center;gap:5px;
+  border:1px solid var(--rule);border-radius:2px;padding:2px 7px;background:var(--paper-2);
+}
+details.pay>summary::-webkit-details-marker{display:none}
+details.pay>summary::before{content:"▸";font-size:9px}
+details.pay[open]>summary::before{content:"▾"}
+details.pay>summary:hover{border-color:var(--navy)}
+pre.json{
+  font-family:var(--mono);font-size:11.5px;line-height:1.5;
+  background:var(--paper-2);border:1px solid var(--rule-soft);border-radius:2px;
+  padding:10px 12px;margin:7px 0 0;overflow:auto;max-height:340px;
+  white-space:pre;color:var(--ink-soft);
+}
+
+/* waterfall */
+.bar{position:relative;height:7px;background:var(--rule-soft);border-radius:1px}
+.bar span{
+  position:absolute;top:0;height:7px;border-radius:1px;min-width:2px;background:var(--navy);
+}
+.bar.k-mcp span{background:var(--crimson)}
+.bar.k-rag span{background:var(--forest)}
+.bar.k-llm span{background:var(--violet)}
+.bar.k-sub span{background:var(--navy)}
+.dur{font-family:var(--mono);font-size:10.5px;color:var(--muted);margin-top:4px;text-align:right}
+
+/* ---------- tool inventory ---------- */
+.tools{display:flex;flex-wrap:wrap;gap:6px;margin-top:12px}
+.tool{
+  font-family:var(--mono);font-size:11.5px;padding:3px 8px;border-radius:2px;
+  border:1px solid var(--rule);background:var(--paper-2);color:var(--muted);
+}
+.tool.used{border-color:var(--crimson);color:var(--crimson);background:#fdeef3;font-weight:600}
+.tool.planned{border-color:var(--amber);color:var(--amber);background:#fbf6e6}
+
+/* ---------- raw ---------- */
+.rawbar{display:flex;gap:9px;margin:14px 0 10px;flex-wrap:wrap}
+.rawbar input,.rawbar select{
+  font:inherit;font-size:13px;padding:6px 9px;border:1px solid var(--rule);
+  border-radius:2px;background:var(--paper-2);color:var(--ink);
+}
+.rawbar input{flex:1 1 240px;font-family:var(--mono);font-size:12.5px}
+.rawbar input:focus,.rawbar select:focus{outline:2px solid var(--navy);outline-offset:-1px}
+table.raw{width:100%;border-collapse:collapse;font-size:12.5px}
+table.raw th{
+  text-align:left;font-size:10px;text-transform:uppercase;letter-spacing:.11em;
+  color:var(--muted);font-weight:600;padding:6px 9px;border-bottom:1px solid var(--ink);
+}
+table.raw td{
+  padding:6px 9px;border-bottom:1px solid var(--rule-soft);vertical-align:top;
+  font-family:var(--mono);font-size:11.5px;color:var(--ink-soft);
+}
+table.raw td.msg{white-space:pre-wrap;word-break:break-word;max-width:0;width:100%}
+table.raw tr:hover td{background:var(--paper)}
+.lvl{font-weight:600}
+.lvl-ERROR{color:var(--crimson)}
+.lvl-WARN{color:var(--amber)}
+.lvl-INFO{color:var(--forest)}
+.lvl-DEBUG,.lvl-TRACE{color:var(--muted)}
+
+.empty{padding:30px 0;color:var(--muted);font-size:14px;text-align:center}
+.err-box{
+  border:1px solid var(--crimson);background:#fdeef3;color:var(--crimson);
+  border-radius:3px;padding:12px 15px;margin-top:14px;font-size:13.5px;
+}
+.hidden{display:none}
+
+@media (max-width:820px){
+  .row{grid-template-columns:46px 1fr}
+  .row .track{display:none}
+  .question{font-size:23px}
+  .body{--ind:0px !important}
+  .body>.inner::before{display:none}
+  .wrap{padding:20px 14px 60px}
+}
+@media (prefers-reduced-motion:no-preference){
+  .row{animation:fade .28s ease-out both}
+  @keyframes fade{from{opacity:0;transform:translateY(3px)}to{opacity:1;transform:none}}
+}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <div class="masthead">
+    <h1>Разбор трейса</h1>
+    <span class="sub">AIAD_CHAT · Kibana → цепочка решений агента</span>
+  </div>
+
+  <label class="drop" id="drop" tabindex="0" role="button">
+    <input type="file" id="picker" multiple accept=".json,application/json">
+    <h2>Перетащите сюда выгрузки Kibana</h2>
+    <p>Несколько файлов <code>kibana_logs_&lt;unixtime&gt;.json</code> — порядок восстановится сам. Или нажмите, чтобы выбрать.</p>
+  </label>
+
+  <div class="files" id="files"></div>
+  <div id="fatal"></div>
+
+  <div id="tabs" class="tabs hidden" role="tablist"></div>
+  <div id="report"></div>
+
+</div>
+
+<script>
+// ==== PARSER:START ====
+const MONTHS = {Jan:0,Feb:1,Mar:2,Apr:3,May:4,Jun:5,Jul:6,Aug:7,Sep:8,Oct:9,Nov:10,Dec:11};
+
+function parseKibanaTs(s){
+  if(!s) return null;
+  let m = /^(\w{3})\s+(\d{1,2}),\s*(\d{4})\s*@\s*(\d{1,2}):(\d{2}):(\d{2})(?:\.(\d{1,3}))?/.exec(s);
+  if(m && MONTHS[m[1]] !== undefined){
+    return new Date(+m[3], MONTHS[m[1]], +m[2], +m[4], +m[5], +m[6], +(m[7]||0));
+  }
+  const d = new Date(s);
+  return isNaN(d) ? null : d;
+}
+
+/* Find a balanced {...} or [...] starting at `start`. Quote- and escape-aware. */
+function balanced(s, start){
+  const open = s[start];
+  const close = open === '{' ? '}' : open === '[' ? ']' : null;
+  if(!close) return null;
+  let depth = 0, inStr = false, esc = false;
+  for(let i = start; i < s.length; i++){
+    const c = s[i];
+    if(esc){ esc = false; continue; }
+    if(c === '\\'){ esc = true; continue; }
+    if(c === '"'){ inStr = !inStr; continue; }
+    if(inStr) continue;
+    if(c === open) depth++;
+    else if(c === close){ depth--; if(depth === 0) return {text: s.slice(start, i+1), end: i+1}; }
+  }
+  return {text: s.slice(start), end: s.length};
+}
+
+/* Logs are PII-masked, which turns numbers into *MASKED_X* and breaks JSON. Repair, then parse. */
+function safeJson(txt){
+  if(!txt) return null;
+  let t = String(txt).trim();
+  t = t.replace(/:\s*\*MASKED_[A-Z_]+\*/g, ': "\u2039masked\u203a"');
+  try { return JSON.parse(t); } catch(e){}
+  try { return JSON.parse(t.replace(/,\s*([}\]])/g, '$1')); } catch(e){}
+  return null;
+}
+
+function unesc(s){
+  if(s == null) return '';
+  return String(s)
+    .replace(/\\r\\n|\\n/g, '\n').replace(/\\r/g, '\n').replace(/\\t/g, '\t')
+    .replace(/\\"/g, '"').replace(/\\'/g, "'").replace(/\\\\/g, '\\');
+}
+
+function firstJsonAfter(msg, marker){
+  const i = msg.indexOf(marker);
+  if(i < 0) return null;
+  let j = i + marker.length;
+  while(j < msg.length && msg[j] !== '{' && msg[j] !== '[') j++;
+  if(j >= msg.length) return null;
+  const b = balanced(msg, j);
+  return b ? b.text : null;
+}
+
+/* Accept {logs:[...]}, [...], {hits:{hits:[...]}} */
+function normalizeFile(json){
+  if(Array.isArray(json)) return {logs: json, url: ''};
+  if(json && Array.isArray(json.logs)) return {logs: json.logs, url: json.url || ''};
+  if(json && json.hits && Array.isArray(json.hits.hits)){
+    return {logs: json.hits.hits.map(h => Object.assign({}, h._source, {_id: h._id})), url: ''};
+  }
+  return null;
+}
+
+function fileOrderKey(name){
+  const m = String(name).match(/(\d{10,16})/);
+  if(!m) return null;
+  let n = +m[1];
+  if(m[1].length <= 10) n *= 1000;          // seconds -> ms
+  else if(m[1].length >= 16) n = Math.round(n/1000); // micros -> ms
+  return n;
+}
+
+const REFUSAL = [/нет данных/i, /не могу/i, /к сожалению/i, /не располагаю/i,
+                 /отсутству\w* данн/i, /нет информации/i, /не удалось найти/i];
+
+/* ---- per-record extractors ------------------------------------------- */
+
+function extractUser(msg, app){
+  // langflow access log carries a clean JSON body
+  if(app === 'alfagen-langflow' && msg.indexOf('/api/v1/run/') >= 0){
+    const raw = firstJsonAfter(msg, 'body=');
+    const o = safeJson(raw);
+    if(o && o.input_value){
+      return {text: o.input_value, session: o.session_id, cus: o.customer_id,
+              channel: o.source_channel_id, os: o.operation_system, segment: o.segment};
+    }
+  }
+  if(app === 'alfagen-compliance-api'){
+    const m = /body:([\s\S]+)$/.exec(msg);
+    if(m) return {text: m[1].trim()};
+  }
+  if(app === 'alfagen-strategy-api' && msg.indexOf('Request to LangFlow:') >= 0){
+    const t = /inputValue=([\s\S]*?), sessionId=/.exec(msg);
+    const s = /sessionId=([^,\]]+)/.exec(msg);
+    const c = /customerId=([^,\]]+)/.exec(msg);
+    const ch = /sourceChannelId=([^,\]]+)/.exec(msg);
+    if(t) return {text: t[1], session: s && s[1], cus: c && c[1], channel: ch && ch[1]};
+  }
+  return null;
+}
+
+function extractContext(msg){
+  const out = {};
+  const grab = k => {
+    const re = new RegExp('key: "' + k + '" value \\{ string_value: "([^"]*)" \\}');
+    const m = re.exec(msg);
+    return m ? m[1] : null;
+  };
+  ['cus','channelApp','deviceModel','segment','am_version','messageNum','operationSystem','mobileUserRole']
+    .forEach(k => { const v = grab(k); if(v) out[k] = v; });
+  return Object.keys(out).length ? out : null;
+}
+
+/* java-functions-service: "Answer is ready with messageId=X: payload { ... }" */
+function extractLlmTurn(msg){
+  const idm = /Answer is ready with messageId=([^:\s]+):/.exec(msg);
+  if(!idm) return null;
+  const out = {messageId: idm[1], toolCalls: [], content: '', finish: null, usage: {}};
+
+  const model = /model \{ value: "([^"]+)" \}/.exec(msg);
+  if(model) out.model = model[1];
+
+  const cm = /content \{ value: "((?:[^"\\]|\\[\s\S])*)" \}/.exec(msg);
+  if(cm) out.content = unesc(cm[1]);
+
+  const fr = /finish_reason \{ value: "([^"]+)" \}/.exec(msg);
+  if(fr) out.finish = fr[1];
+
+  const re = /function \{ name \{ value: "([^"]+)" \} arguments \{ value: "((?:[^"\\]|\\[\s\S])*)" \} \}/g;
+  let m;
+  while((m = re.exec(msg))){
+    out.toolCalls.push({name: m[1], args: unesc(m[2])});
+  }
+  ['prompt_tokens','completion_tokens','total_tokens'].forEach(k => {
+    const t = new RegExp(k + ' \\{ value: (\\d+) \\}').exec(msg);
+    if(t) out.usage[k] = +t[1];
+  });
+  return out;
+}
+
+/* Classify an LLM turn by the shape of what it produced. */
+function classifyTurn(turn){
+  if(turn.toolCalls.length) return {role: 'Решение вызвать инструмент', tag: 'call'};
+  const o = safeJson(turn.content);
+  if(o && typeof o === 'object'){
+    if('route' in o && 'steps' in o) return {role: 'План маршрутизации', tag: 'plan', data: o};
+    if('approved' in o || 'is_safe' in o) return {role: 'Проверка безопасности', tag: 'guard', data: o};
+    if('query' in o && 'decision' in o) return {role: 'Переформулировка запроса', tag: 'reform', data: o};
+    return {role: 'Структурированный вывод', tag: 'json', data: o};
+  }
+  return {role: 'Текстовый ответ', tag: 'text'};
+}
+
+/* MCP adapter lines */
+function extractMcp(msg){
+  const method = /MCP_METHOD:\s*([\w\/]+)/.exec(msg);
+  const hasTool = /(?:^|,\s*)TOOL:\s*([\w.\-]+)/.exec(msg);
+  if(!method && !hasTool) return null;
+
+  const out = {method: method ? method[1] : null, tool: hasTool ? hasTool[1] : null};
+
+  const pi = msg.indexOf('PARAMETERS:');
+  if(pi >= 0){
+    let j = pi + 'PARAMETERS:'.length;
+    while(j < msg.length && msg[j] !== '{' && msg[j] !== '[') j++;
+    const b = balanced(msg, j);
+    if(b) out.params = b.text;
+  }
+  const ri = msg.indexOf('RESULT:');
+  if(ri >= 0){
+    let j = ri + 'RESULT:'.length;
+    while(j < msg.length && msg[j] !== '{' && msg[j] !== '[') j++;
+    const b = balanced(msg, j);
+    out.result = b ? b.text : msg.slice(ri + 7).trim();
+  }
+  const d = /(?:^|,\s*)DURATION_MS:\s*([\d.]+)/.exec(msg);
+  if(d) out.ms = +d[1];
+  const ad = /ALFADIRECT_DURATION_MS:\s*([\d.]+)/.exec(msg);
+  if(ad) out.upstreamMs = +ad[1];
+  const st = /HTTP_STATUS:\s*(\d+)/.exec(msg);
+  if(st) out.status = +st[1];
+
+  out.isCall = !!(out.result || (out.method === 'tool/call'));
+  out.isHandshake = !out.tool && !!out.method;
+  return out;
+}
+
+/* langflow: "[TOOL] | Request|Response | name | headers={...} | body=..." */
+function extractSubAgent(msg){
+  const m = /\[TOOL\]\s*\|\s*(Request|Response)\s*\|\s*([\w.\-]+)\s*\|/.exec(msg);
+  if(!m) return null;
+  const out = {phase: m[1], name: m[2]};
+  const h = firstJsonAfter(msg, 'headers=');
+  const ho = safeJson(h);
+  if(ho){
+    out.runId = ho.run_id; out.parentRunId = ho.parent_run_id; out.status = ho.status;
+    if(ho.start_time && ho.finish_time){
+      const a = new Date(ho.start_time), b = new Date(ho.finish_time);
+      if(!isNaN(a) && !isNaN(b)) out.ms = b - a;
+    }
+  }
+  const bi = msg.indexOf('| body=');
+  if(bi >= 0) out.body = msg.slice(bi + 7).trim();
+  return out;
+}
+
+function extractRag(msg){
+  if(msg.indexOf('[RAG') < 0 && msg.indexOf('чанк') < 0 && msg.indexOf('/chunks') < 0) return null;
+  const out = {};
+  const q = /Запрос к ARAG:\s*system_id=([\w\-]+),\s*query_len=(\d+),\s*filters=(.+)$/.exec(msg);
+  if(q){ out.kind = 'request'; out.systemId = q[1]; out.queryLen = +q[2]; out.filters = q[3]; }
+  const got = /Получено\s+(\d+)\s+чанк/.exec(msg);
+  if(got){ out.kind = 'response'; out.chunks = +got[1]; }
+  const cr = /Chunks request with request=/.exec(msg);
+  if(cr){
+    out.kind = 'gateway';
+    const qq = /'query':\s*'([^']*)'/.exec(msg);
+    if(qq) out.query = qq[1];
+  }
+  return Object.keys(out).length ? out : null;
+}
+
+function extractAvailableTools(msg){
+  if(msg.indexOf('update_tools') < 0 && msg.indexOf('сохранены в кэш') < 0) return null;
+  const srv = /server=([\w\-]+)/.exec(msg);
+  const li = msg.indexOf("tools=[");
+  if(li < 0) return null;
+  const b = balanced(msg, li + 6);
+  if(!b) return null;
+  const names = [];
+  const re = /'([\w.\-]+)'|"([\w.\-]+)"/g;
+  let m;
+  while((m = re.exec(b.text))) names.push(m[1] || m[2]);
+  if(!names.length) return null;
+  return {server: srv ? srv[1] : 'mcp', tools: names};
+}
+
+function extractFinalAnswer(msg, app){
+  if(app === 'alfagen-strategy-api' && msg.indexOf('Request to LangFlow succeeded') >= 0){
+    const m = /LangFlowResponse\[sessionId=([^,]*), text=([\s\S]*)\]\s*$/.exec(msg);
+    if(m) return {session: m[1], text: m[2]};
+  }
+  return null;
+}
+
+function extractDelivery(msg){
+  if(msg.indexOf('Success sent answer') >= 0){
+    const s = /sessionId='([^']*)'/.exec(msg);
+    const u = /userId='([^']*)'/.exec(msg);
+    return {kind: 'sent', session: s && s[1], userId: u && u[1]};
+  }
+  if(msg.indexOf("changed status to 'ANSWERED'") >= 0) return {kind: 'answered'};
+  return null;
+}
+
+/* ---- main build ------------------------------------------------------ */
+
+function buildTraces(fileEntries){
+  // filename unixtime decides file order; log timestamps decide event order
+  const ordered = fileEntries.slice().sort((a, b) => {
+    const ka = fileOrderKey(a.name), kb = fileOrderKey(b.name);
+    if(ka != null && kb != null) return ka - kb;
+    if(ka != null) return -1;
+    if(kb != null) return 1;
+    return a.name.localeCompare(b.name);
+  });
+  ordered.forEach((f, i) => { f.order = i + 1; f.key = fileOrderKey(f.name); });
+
+  const seen = new Set();
+  const all = [];
+  ordered.forEach(f => {
+    (f.logs || []).forEach((l, idx) => {
+      const id = l._id || (f.name + ':' + idx);
+      if(seen.has(id)) { f.dupes = (f.dupes || 0) + 1; return; }
+      seen.add(id);
+      const t = parseKibanaTs(l['@timestamp'] || l.timestamp);
+      all.push({raw: l, t: t, ts: t ? t.getTime() : 0, srcFile: f.name,
+                app: l.app_id || '', msg: l.message || '', level: l.level || '',
+                logger: l.logger || '', traceId: l.traceId || '(нет traceId)'});
+    });
+  });
+  all.sort((a, b) => a.ts - b.ts);
+
+  const groups = new Map();
+  all.forEach(r => {
+    if(!groups.has(r.traceId)) groups.set(r.traceId, []);
+    groups.get(r.traceId).push(r);
+  });
+
+  const traces = [];
+  groups.forEach((recs, traceId) => traces.push(buildOne(traceId, recs)));
+  traces.sort((a, b) => b.records.length - a.records.length);
+
+  return {traces: traces, files: ordered, total: all.length};
+}
+
+function buildOne(traceId, recs){
+  const t0 = recs.length ? recs[0].ts : 0;
+  const t1 = recs.length ? recs[recs.length - 1].ts : 0;
+  const meta = {traceId: traceId, from: recs[0] && recs[0].t, to: recs[recs.length-1] && recs[recs.length-1].t,
+                durationMs: t1 - t0};
+  const events = [];
+  const availableTools = new Map();
+  const spans = [];   // sub-agent [Request..Response] windows, for nesting
+  let plan = null, finalAnswer = null, delivered = false, userQ = null;
+  const seenMsgIds = new Map();
+
+  // pass 1: request/response timing per LLM messageId (start = first sighting, end = "Answer is ready")
+  recs.forEach(r => {
+    const ids = r.msg.match(/messageId[=:]\s*'?"?([0-9a-fA-F\-]{16,})/g);
+    if(!ids) return;
+    ids.forEach(chunk => {
+      const m = /([0-9a-fA-F\-]{16,})$/.exec(chunk);
+      if(!m) return;
+      const id = m[1];
+      const cur = seenMsgIds.get(id) || {start: r.ts, end: r.ts};
+      cur.start = Math.min(cur.start, r.ts);
+      cur.end = Math.max(cur.end, r.ts);
+      seenMsgIds.set(id, cur);
+    });
+  });
+
+  recs.forEach(r => {
+    const msg = r.msg, app = r.app;
+
+    // --- user question (fields arrive across several services; merge, don't overwrite)
+    const u = extractUser(msg, app);
+    if(u && u.text && u.text.trim()){
+      if(!userQ){
+        userQ = u;
+        events.push({ts: r.ts, kind: 'user', depth: 0, chip: 'Запрос', chipClass: 'c-user',
+                     title: 'Сообщение пользователя', quote: u.text.trim(), app: app});
+      } else {
+        Object.keys(u).forEach(k => { if(!userQ[k] && u[k]) userQ[k] = u[k]; });
+      }
+    }
+    const ctx = (app === 'alfagen-strategy-api' && msg.indexOf('Incoming request') >= 0) ? extractContext(msg) : null;
+    if(ctx) meta.ctx = Object.assign(meta.ctx || {}, ctx);
+
+    // --- available MCP tools
+    const av = extractAvailableTools(msg);
+    if(av && !availableTools.has(av.server)) availableTools.set(av.server, av.tools);
+
+    // --- LLM turns
+    if(app === 'alfagen-java-functions-service'){
+      const turn = extractLlmTurn(msg);
+      if(turn){
+        const cls = classifyTurn(turn);
+        const span = seenMsgIds.get(turn.messageId);
+        const ev = {ts: r.ts, kind: 'llm', depth: 0, chip: 'Модель', chipClass: 'c-llm',
+                    title: cls.role, tag: cls.tag, app: app, model: turn.model,
+                    usage: turn.usage, finish: turn.finish, messageId: turn.messageId,
+                    startTs: span ? span.start : r.ts, ms: span ? (span.end - span.start) : null};
+
+        if(cls.tag === 'plan'){
+          plan = cls.data;
+          const tools = (cls.data.steps || []).reduce((acc, s) => acc.concat(s.tools || []), []);
+          ev.planTools = tools;
+          ev.meta = 'route=' + (cls.data.route || '?') + (tools.length ? ' · инструменты: ' + tools.join(', ') : '');
+          ev.quote = cls.data.reason || '';
+          ev.payload = turn.content;
+        } else if(cls.tag === 'reform'){
+          ev.quote = cls.data.query || '';
+          ev.meta = cls.data.decision || '';
+          ev.payload = turn.content;
+        } else if(cls.tag === 'guard'){
+          const ok = cls.data.approved;
+          ev.meta = (ok ? 'пропущено' : 'ЗАБЛОКИРОВАНО') +
+                    ' · is_safe=' + cls.data.is_safe + ' · is_relevant=' + cls.data.is_relevant;
+          ev.quote = cls.data.comment || '';
+          ev.payload = turn.content;
+          if(!ok) ev.bad = true;
+        } else if(cls.tag === 'call'){
+          ev.calls = turn.toolCalls.map(tc => ({name: tc.name, args: tc.args}));
+          ev.meta = 'вызывает: ' + ev.calls.map(c => c.name).join(', ');
+          ev.depth = 1;
+        } else {
+          ev.quote = turn.content;
+          ev.payload = turn.content.length > 400 ? turn.content : null;
+        }
+        events.push(ev);
+      }
+    }
+
+    // --- sub-agent boundaries
+    const sa = extractSubAgent(msg);
+    if(sa){
+      if(sa.phase === 'Request'){
+        spans.push({name: sa.name, start: r.ts, end: Infinity, runId: sa.runId});
+        events.push({ts: r.ts, kind: 'subagent', phase: 'in', depth: 1, chip: 'Саб-агент', chipClass: 'c-sub',
+                     title: 'Вызов ', name: sa.name, app: app,
+                     meta: 'вход', payload: sa.body, dedupeKey: 'sub-req:' + sa.name + ':' + sa.runId});
+      } else {
+        const sp = spans.filter(s => s.name === sa.name && s.end === Infinity).pop();
+        if(sp) sp.end = r.ts;
+        events.push({ts: r.ts, kind: 'subagent', phase: 'out', depth: 1, chip: 'Саб-агент', chipClass: 'c-sub',
+                     title: 'Ответ ', name: sa.name, app: app, ms: sa.ms,
+                     startTs: sp ? sp.start : null,
+                     meta: 'статус: ' + (sa.status || '—'), payload: sa.body,
+                     dedupeKey: 'sub-res:' + sa.name + ':' + sa.runId});
+      }
+    }
+
+    // --- MCP
+    if(app.indexOf('mcp-server') >= 0 || msg.indexOf('MCP_METHOD') >= 0){
+      const mc = extractMcp(msg);
+      if(mc){
+        if(mc.isCall && mc.result){
+          events.push({ts: r.ts, kind: 'mcp', depth: 2, chip: 'MCP', chipClass: 'c-mcp',
+                       title: 'Инструмент ', name: mc.tool, app: app,
+                       ms: mc.ms, upstreamMs: mc.upstreamMs, status: mc.status,
+                       params: mc.params, result: mc.result,
+                       meta: (mc.ms != null ? Math.round(mc.ms) + ' мс' : '') +
+                             (mc.upstreamMs != null ? ' · апстрим ' + Math.round(mc.upstreamMs) + ' мс' : ''),
+                       dedupeKey: 'mcp:' + mc.tool + ':' + r.ts});
+        } else if(mc.isHandshake){
+          events.push({ts: r.ts, kind: 'sys', depth: 2, chip: 'MCP', chipClass: 'c-sys',
+                       title: 'Протокол ', name: mc.method, app: app, minor: true,
+                       meta: (mc.ms != null ? Math.round(mc.ms) + ' мс' : '') +
+                             (mc.status ? ' · HTTP ' + mc.status : '')});
+        }
+      }
+    }
+
+    // --- RAG
+    const rg = extractRag(msg);
+    if(rg){
+      if(rg.kind === 'request'){
+        events.push({ts: r.ts, kind: 'rag', depth: 2, chip: 'RAG', chipClass: 'c-rag',
+                     title: 'Запрос в ARAG', app: app,
+                     meta: 'system_id=' + rg.systemId + ' · фильтры: ' + (rg.filters || '—'),
+                     dedupeKey: 'rag-req:' + r.ts});
+      } else if(rg.kind === 'response'){
+        events.push({ts: r.ts, kind: 'rag', depth: 2, chip: 'RAG', chipClass: 'c-rag',
+                     title: 'Получено чанков: ' + rg.chunks, app: app, chunks: rg.chunks,
+                     dedupeKey: 'rag-res:' + r.ts});
+      } else if(rg.kind === 'gateway' && rg.query){
+        events.push({ts: r.ts, kind: 'rag', depth: 2, chip: 'RAG', chipClass: 'c-rag',
+                     title: 'Поиск по базе знаний', app: app, quote: rg.query,
+                     dedupeKey: 'rag-gw:' + r.ts});
+      }
+    }
+
+    // --- final answer + delivery
+    const fa = extractFinalAnswer(msg, app);
+    if(fa && fa.text && fa.text.trim()){
+      finalAnswer = fa.text.trim();
+      events.push({ts: r.ts, kind: 'answer', depth: 0, chip: 'Ответ', chipClass: 'c-ans',
+                   title: 'Ответ отдан в сессию', quote: finalAnswer, app: app, full: true});
+    }
+    const dl = extractDelivery(msg);
+    if(dl){
+      if(dl.kind === 'sent'){
+        delivered = true;
+        meta.userId = dl.userId || meta.userId;
+        events.push({ts: r.ts, kind: 'answer', depth: 0, chip: 'Доставка', chipClass: 'c-ans',
+                     title: 'Ответ отправлен пользователю', app: app,
+                     meta: dl.userId ? 'userId ' + dl.userId : ''});
+      }
+    }
+
+    // --- errors
+    if(r.level === 'ERROR' || r.level === 'WARN' ||
+       (r.raw.exception && r.raw.exception !== '(empty)' && r.raw.exception !== '-')){
+      events.push({ts: r.ts, kind: 'error', depth: 0, chip: r.level || 'СБОЙ', chipClass: 'c-err',
+                   title: r.logger || app, app: app, quote: msg.slice(0, 600),
+                   payload: (r.raw.exception && r.raw.exception !== '(empty)') ? r.raw.exception : null});
+    }
+  });
+
+  // dedupe repeated langflow/MCP emissions
+  const seenKeys = new Set();
+  let clean = events.filter(e => {
+    if(!e.dedupeKey) return true;
+    if(seenKeys.has(e.dedupeKey)) return false;
+    seenKeys.add(e.dedupeKey);
+    return true;
+  });
+  clean.sort((a, b) => a.ts - b.ts || a.depth - b.depth);
+
+  const allAvailable = Array.from(new Set([].concat.apply([], Array.from(availableTools.values()))));
+
+  // langflow exposes MCP tools as ordinary tools; re-label those so they don't pose as sub-agents
+  clean.forEach(e => {
+    if(e.kind === 'subagent' && allAvailable.indexOf(e.name) >= 0){
+      e.kind = 'mcpwrap'; e.chip = 'MCP'; e.chipClass = 'c-mcp'; e.depth = 2;
+    }
+  });
+
+  // pull errors out of the narrative and group them by signature
+  const errorGroups = new Map();
+  clean = clean.filter(e => {
+    if(e.kind !== 'error') return true;
+    const sig = (e.title || '') + '|' + (e.quote || '')
+      .replace(/\*MASKED_[A-Z_]+\*/g, '\u00b7')
+      .replace(/[0-9a-f\u00b7\-]{8,}/gi, '\u00b7').slice(0, 90);
+    const g = errorGroups.get(sig);
+    if(g){ g.count++; g.last = e.ts; }
+    else errorGroups.set(sig, {count: 1, first: e.ts, last: e.ts, level: e.chip,
+                              logger: e.title, sample: e.quote || '', app: e.app});
+    return false;
+  });
+
+  // collapse MCP handshake chatter into one row per burst
+  const handshakes = clean.filter(e => e.kind === 'sys');
+  clean = clean.filter(e => e.kind !== 'sys');
+  const bursts = [];
+  handshakes.forEach(e => {
+    const host = spans.find(s => e.ts >= s.start && e.ts <= s.end);
+    const key = host ? host.name : '\u2014';
+    let b = bursts.find(x => x.key === key && e.ts - x.last < 20000);
+    if(!b){ b = {key: key, under: host ? host.name : null, ts: e.ts, last: e.ts, methods: {}, n: 0}; bursts.push(b); }
+    b.last = e.ts; b.n++;
+    b.methods[e.name] = (b.methods[e.name] || 0) + 1;
+  });
+  bursts.forEach(b => clean.push({
+    ts: b.ts, kind: 'sys', depth: 2, chip: 'MCP', chipClass: 'c-sys', minor: true,
+    title: 'Рукопожатие с сервером', under: b.under,
+    meta: Object.keys(b.methods).map(k => k + ' ×' + b.methods[k]).join(' · ')
+  }));
+
+  // one MCP call surfaces twice: once as a LangFlow tool wrapper, once from the
+  // adapter. Keep the adapter record (it carries params + result) and fold the
+  // wrapper's round-trip time into it.
+  const wrapped = new Set();
+  clean.forEach(w => {
+    if(w.kind !== 'mcpwrap') return;
+    const hit = clean.find(e => e.kind === 'mcp' && e.name === w.name && Math.abs(e.ts - w.ts) < 8000);
+    if(!hit) return;
+    wrapped.add(w);
+    if(w.phase === 'out' && w.ms != null){
+      hit.wrapMs = w.ms;
+      hit.meta = (hit.meta ? hit.meta + ' · ' : '') + 'через LangFlow ' + Math.round(w.ms) + ' мс';
+    }
+  });
+  clean = clean.filter(e => !wrapped.has(e));
+
+  // nest by time containment: what happened inside a sub-agent belongs under it
+  clean.forEach(e => {
+    const host = spans.find(s => e.ts >= s.start && e.ts <= s.end);
+    if(host && e.kind !== 'subagent') e.under = host.name;
+    if(e.kind === 'llm') e.depth = host ? 2 : (e.calls ? 1 : 0);
+  });
+  clean.sort((a, b) => a.ts - b.ts || a.depth - b.depth);
+
+  const mcpCalls = clean.filter(e => e.kind === 'mcp');
+  const ragHits = clean.filter(e => e.kind === 'rag' && e.chunks != null);
+  const subCalls = clean.filter(e => e.kind === 'subagent' && e.phase === 'in');
+  const calledSubs = Array.from(new Set(subCalls.map(e => e.name)));
+  const calledMcp = Array.from(new Set(mcpCalls.map(e => e.name)));
+
+  // the real conversation ends at the last meaningful event; stray stream-close
+  // warnings minutes later must not stretch the scale
+  const STORY = {user: 1, llm: 1, subagent: 1, mcp: 1, mcpwrap: 1, rag: 1, answer: 1};
+  const storyEvents = clean.filter(e => STORY[e.kind]);
+  const tEnd = storyEvents.length ? storyEvents[storyEvents.length - 1].ts : t1;
+  meta.durationMs = Math.max(tEnd - t0, 1);
+  meta.spanMs = t1 - t0;
+  clean.forEach(e => { e.rel = (e.ts - t0) / 1000; });
+  clean = clean.filter(e => e.ts <= tEnd + 1000);
+
+  // ---- verdict
+  const findings = [];
+  if(!userQ) findings.push({level: 'note', text: 'Текст запроса пользователя в этих файлах не найден — возможно, не хватает более ранней страницы выгрузки.'});
+  if(!mcpCalls.length){
+    findings.push({level: 'warn', text: 'Ни одного результативного вызова MCP-инструмента. Агент не дошёл до данных — смотрите маршрутизацию, а не адаптер.'});
+  } else {
+    findings.push({level: 'ok', text: 'Вызовов MCP-инструментов: <b>' + mcpCalls.length + '</b> (' + calledMcp.map(n => '<code>' + n + '</code>').join(', ') + ').'});
+  }
+  if(plan){
+    const planned = (plan.steps || []).reduce((a, s) => a.concat(s.tools || []), []);
+    const missed = planned.filter(t => calledSubs.indexOf(t) < 0);
+    if(missed.length){
+      findings.push({level: 'warn', text: 'Планировщик назначил ' + planned.map(t => '<code>' + t + '</code>').join(', ') +
+        ', но так и не вызваны: ' + missed.map(t => '<code>' + t + '</code>').join(', ') + '.'});
+    }
+  }
+  if(ragHits.length){
+    findings.push({level: 'ok', text: 'RAG отработал: получено чанков — <b>' + ragHits.map(e => e.chunks).join(', ') + '</b>.'});
+  } else {
+    findings.push({level: 'note', text: 'В RAG агент не ходил.'});
+  }
+  if(allAvailable.length && calledMcp.length){
+    const unused = allAvailable.length - calledMcp.length;
+    if(unused > 0) findings.push({level: 'note', text: 'Инструментов было доступно <b>' + allAvailable.length + '</b>, задействован <b>' + calledMcp.length + '</b>.'});
+  }
+  if(finalAnswer && REFUSAL.some(re => re.test(finalAnswer))){
+    findings.push({level: 'warn', text: 'В финальном ответе есть признаки отказа («нет данных», «к сожалению») — пользователь, скорее всего, ушёл ни с чем.'});
+  }
+  const errs = Array.from(errorGroups.values()).sort((a, b) => b.count - a.count);
+  const errTotal = errs.reduce((a, g) => a + g.count, 0);
+  if(errTotal){
+    findings.push({level: 'warn', text: 'Записей уровня ERROR/WARN: <b>' + errTotal +
+      '</b> в <b>' + errs.length + '</b> различных видах — вынесены в отдельный раздел ниже.'});
+  }
+  if(delivered) findings.push({level: 'ok', text: 'Ответ доставлен в чат.'});
+  else if(finalAnswer) findings.push({level: 'note', text: 'Подтверждения доставки в bot-conversation-api нет.'});
+
+  return {
+    traceId: traceId, meta: meta, records: recs, events: clean,
+    userQ: userQ, plan: plan, finalAnswer: finalAnswer, delivered: delivered,
+    availableTools: allAvailable, calledMcp: calledMcp, calledSubs: calledSubs,
+    plannedSubs: plan ? (plan.steps || []).reduce((a, s) => a.concat(s.tools || []), []) : [],
+    findings: findings, errors: errs, errorTotal: errTotal,
+    stats: {
+      records: recs.length,
+      mcp: mcpCalls.length,
+      rag: ragHits.reduce((a, e) => a + e.chunks, 0),
+      llm: clean.filter(e => e.kind === 'llm').length,
+      subs: subCalls.length,
+      seconds: (meta.durationMs / 1000)
+    }
+  };
+}
+// ==== PARSER:END ====
+
+/* ====================== UI ====================== */
+const $ = s => document.querySelector(s);
+const esc = s => String(s == null ? '' : s)
+  .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+
+let STATE = {traces: [], files: [], active: 0};
+
+const drop = $('#drop'), picker = $('#picker');
+['dragenter','dragover'].forEach(ev => drop.addEventListener(ev, e => {
+  e.preventDefault(); drop.classList.add('hot');
+}));
+['dragleave','drop'].forEach(ev => drop.addEventListener(ev, e => {
+  e.preventDefault(); drop.classList.remove('hot');
+}));
+drop.addEventListener('drop', e => { if(e.dataTransfer && e.dataTransfer.files) loadFiles(e.dataTransfer.files); });
+drop.addEventListener('keydown', e => { if(e.key === 'Enter' || e.key === ' '){ e.preventDefault(); picker.click(); } });
+picker.addEventListener('change', () => loadFiles(picker.files));
+
+async function loadFiles(list){
+  const files = Array.from(list || []);
+  if(!files.length) return;
+  $('#fatal').innerHTML = '';
+  const entries = [], broken = [];
+  for(const f of files){
+    try{
+      const txt = await f.text();
+      const norm = normalizeFile(JSON.parse(txt));
+      if(!norm){ broken.push({name: f.name, why: 'не найден массив logs'}); continue; }
+      entries.push({name: f.name, logs: norm.logs, url: norm.url});
+    }catch(err){
+      broken.push({name: f.name, why: 'файл не разбирается как JSON'});
+    }
+  }
+  if(!entries.length){
+    $('#fatal').innerHTML = '<div class="err-box">Ни один файл не удалось прочитать. Нужен JSON вида <code>{"logs":[…]}</code> — ровно то, что отдаёт выгрузка из Kibana.</div>';
+    renderFiles(broken.map(b => ({name: b.name, bad: b.why})));
+    return;
+  }
+  const built = buildTraces(entries);
+  STATE.traces = built.traces;
+  STATE.files = built.files;
+  STATE.active = 0;
+  renderFiles(built.files.concat(broken.map(b => ({name: b.name, bad: b.why}))));
+  renderTabs();
+  renderReport();
+  if(broken.length){
+    $('#fatal').innerHTML = '<div class="err-box">Пропущено файлов: ' + broken.length + '. Проверьте, что это выгрузки Kibana в JSON.</div>';
+  }
+  $('#report').scrollIntoView({behavior: 'smooth', block: 'start'});
+}
+
+function renderFiles(files){
+  const box = $('#files');
+  if(!files.length){ box.innerHTML = ''; return; }
+  const chips = files.map(f => {
+    if(f.bad) return '<span class="file-chip bad">' + esc(f.name) + ' — ' + esc(f.bad) + '</span>';
+    const when = f.key ? new Date(f.key).toLocaleString('ru-RU') : 'без метки времени';
+    return '<span class="file-chip"><span class="ord">' + f.order + '</span>' +
+           '<b>' + esc(f.name) + '</b>' + esc(when) + ' · ' + (f.logs ? f.logs.length : 0) + ' зап.' +
+           (f.dupes ? ' · −' + f.dupes + ' дубл.' : '') + '</span>';
+  }).join('');
+  box.innerHTML = chips + '<button class="reset" id="reset">Очистить</button>';
+  const r = $('#reset');
+  if(r) r.onclick = () => {
+    STATE = {traces: [], files: [], active: 0};
+    box.innerHTML = ''; $('#report').innerHTML = '';
+    $('#tabs').classList.add('hidden'); $('#tabs').innerHTML = '';
+    $('#fatal').innerHTML = ''; picker.value = '';
+  };
+}
+
+function renderTabs(){
+  const tabs = $('#tabs');
+  if(STATE.traces.length <= 1){ tabs.classList.add('hidden'); tabs.innerHTML = ''; return; }
+  tabs.classList.remove('hidden');
+  tabs.innerHTML = STATE.traces.map((t, i) =>
+    '<button class="tab" role="tab" data-i="' + i + '" aria-selected="' + (i === STATE.active) + '">' +
+    esc(t.traceId.slice(0, 12)) + '… · ' + t.stats.records + ' зап.</button>').join('');
+  tabs.querySelectorAll('.tab').forEach(b => b.onclick = () => {
+    STATE.active = +b.dataset.i; renderTabs(); renderReport();
+  });
+}
+
+function fmtRel(s){
+  if(s < 10) return '+' + s.toFixed(2) + 'с';
+  return '+' + s.toFixed(1) + 'с';
+}
+function fmtMs(ms){
+  if(ms == null) return '';
+  return ms >= 1000 ? (ms / 1000).toFixed(2) + ' с' : Math.round(ms) + ' мс';
+}
+function pretty(txt){
+  const o = safeJson(txt);
+  if(o) { try { return JSON.stringify(o, null, 2); } catch(e){} }
+  return String(txt == null ? '' : txt);
+}
+function payloadBlock(label, txt){
+  if(!txt) return '';
+  return '<details class="pay"><summary>' + esc(label) + '</summary><pre class="json">' + esc(pretty(txt)) + '</pre></details>';
+}
+
+function renderReport(){
+  const host = $('#report');
+  if(!STATE.traces.length){ host.innerHTML = ''; return; }
+  const tr = STATE.traces[STATE.active];
+  const m = tr.meta, ctx = m.ctx || {};
+
+  const idcells = [
+    ['traceId', tr.traceId],
+    ['cus', (tr.userQ && tr.userQ.cus) || ctx.cus || '—'],
+    ['sessionId', (tr.userQ && tr.userQ.session) || '—'],
+    ['канал', (tr.userQ && tr.userQ.channel) || ctx.channelApp || '—'],
+    ['устройство', ctx.deviceModel || (tr.userQ && tr.userQ.os) || '—'],
+    ['сегмент', ctx.segment || (tr.userQ && tr.userQ.segment) || '—'],
+    ['начало', m.from ? m.from.toLocaleString('ru-RU') : '—'],
+    ['длительность', (m.durationMs / 1000).toFixed(1) + ' с']
+  ].map(p => '<div class="idcell"><dt>' + esc(p[0]) + '</dt><dd>' + esc(p[1]) + '</dd></div>').join('');
+
+  const findings = tr.findings.map(f =>
+    '<div class="finding ' + f.level + '"><span class="dot"></span><div>' + f.text + '</div></div>').join('');
+
+  const stats = [
+    ['зап. в трейсе', tr.stats.records, ''],
+    ['ходов LLM', tr.stats.llm, ''],
+    ['саб-агентов', tr.stats.subs, ''],
+    ['вызовов MCP', tr.stats.mcp, tr.stats.mcp === 0 ? 'hl' : ''],
+    ['чанков RAG', tr.stats.rag, ''],
+    ['секунд', tr.stats.seconds.toFixed(1), '']
+  ].map(s => '<div class="stat ' + s[2] + '"><div class="v">' + esc(s[1]) + '</div><div class="k">' + esc(s[0]) + '</div></div>').join('');
+
+  const total = Math.max(m.durationMs, 1);
+  const rows = tr.events.map(e => {
+    const ind = e.depth * 26;
+    const bar = (() => {
+      const st = (e.startTs != null ? e.startTs : e.ts) - (tr.records[0] ? tr.records[0].ts : 0);
+      const dur = e.ms != null ? e.ms : 0;
+      const left = Math.max(0, Math.min(100, st / total * 100));
+      const w = Math.max(1.2, Math.min(100 - left, dur / total * 100));
+      const k = (e.kind === 'mcp' || e.kind === 'mcpwrap') ? 'k-mcp' : e.kind === 'rag' ? 'k-rag' :
+                e.kind === 'llm' ? 'k-llm' : 'k-sub';
+      return '<div class="bar ' + k + '"><span style="left:' + left.toFixed(2) + '%;width:' + w.toFixed(2) + '%"></span></div>' +
+             (e.ms != null ? '<div class="dur">' + esc(fmtMs(e.ms)) + '</div>' : '');
+    })();
+
+    let inner = '<span class="chip ' + e.chipClass + '">' + esc(e.chip) + '</span>' +
+                '<span class="title">' + esc(e.title) + (e.name ? '<span class="name">' + esc(e.name) + '</span>' : '') + '</span>';
+    if(e.under) inner += '<div class="meta">внутри <b>' + esc(e.under) + '</b></div>';
+    if(e.meta) inner += '<div class="meta">' + esc(e.meta) + '</div>';
+    if(e.usage && e.usage.total_tokens) inner += '<div class="meta">токены: ' + e.usage.prompt_tokens + ' → ' + e.usage.completion_tokens + '</div>';
+    if(e.quote) inner += '<div class="quote' + (e.full ? ' full' : '') + '">' + esc(e.quote) + '</div>';
+    if(e.calls) inner += e.calls.map(c => payloadBlock('аргументы ' + c.name, c.args)).join('');
+    if(e.params) inner += payloadBlock('параметры запроса', e.params);
+    if(e.result) inner += payloadBlock('ответ инструмента', e.result);
+    if(e.payload) inner += payloadBlock('полезная нагрузка', e.payload);
+
+    return '<div class="row' + (e.minor ? ' minor' : '') + '"><div class="clock">' + esc(fmtRel(e.rel)) + '</div>' +
+           '<div class="body d' + e.depth + '" style="--ind:' + ind + 'px"><div class="inner">' + inner + '</div></div>' +
+           '<div class="track">' + bar + '</div></div>';
+  }).join('');
+
+  const toolInv = tr.availableTools.length ? (
+    '<div class="section"><div class="section-head"><h2>Инструменты</h2>' +
+    '<span class="hint">красным — вызванные, жёлтым — назначенные планировщиком, но не вызванные</span></div>' +
+    '<div class="tools">' + tr.availableTools.map(t => {
+      const used = tr.calledMcp.indexOf(t) >= 0;
+      const planned = !used && tr.plannedSubs.indexOf(t) >= 0;
+      return '<span class="tool ' + (used ? 'used' : planned ? 'planned' : '') + '">' + esc(t) + '</span>';
+    }).join('') + '</div>' +
+    (tr.plannedSubs.length ? '<div class="tools" style="margin-top:10px">' + tr.plannedSubs.map(t => {
+      const called = tr.calledSubs.indexOf(t) >= 0;
+      return '<span class="tool ' + (called ? 'used' : 'planned') + '">' + esc(t) + (called ? ' ✓' : ' — не вызван') + '</span>';
+    }).join('') + '</div>' : '') + '</div>'
+  ) : '';
+
+  host.innerHTML =
+    '<div class="dossier">' +
+      '<div class="eyebrow">О чём спросили</div>' +
+      '<p class="question"><span class="q-mark">«</span>' +
+        esc(tr.userQ && tr.userQ.text ? tr.userQ.text.trim() : 'запрос не найден в выгрузке') +
+      '<span class="q-mark">»</span></p>' +
+      '<div class="idbar">' + idcells + '</div>' +
+    '</div>' +
+    '<div class="verdict"><div class="verdict-head">Что произошло</div>' + findings + '</div>' +
+    '<div class="stats">' + stats + '</div>' +
+    '<div class="section"><div class="section-head"><h2>Хроника</h2>' +
+      '<span class="hint">отступ — глубина вызова, полоса справа — время</span></div>' +
+      '<div class="spine">' + (rows || '<div class="empty">Значимых событий не найдено.</div>') + '</div></div>' +
+    toolInv +
+    (tr.errors.length ? '<div class="section"><div class="section-head"><h2>Сбои и предупреждения</h2>' +
+      '<span class="hint">' + tr.errorTotal + ' записей, свёрнуты по одинаковым сигнатурам</span></div>' +
+      '<div class="verdict" style="margin-top:14px">' + tr.errors.map(g =>
+        '<div class="finding ' + (g.level === 'ERROR' ? 'warn' : 'note') + '"><span class="dot"></span><div>' +
+        '<b>' + esc(g.level) + ' ×' + g.count + '</b> · <code>' + esc(String(g.logger).split('.').pop()) + '</code>' +
+        '<div class="meta" style="margin-top:4px">' + esc(g.sample.replace(/\s+/g, ' ').slice(0, 260)) + '</div>' +
+        '</div></div>').join('') + '</div></div>' : '') +
+    (tr.finalAnswer ? '<div class="section"><div class="section-head"><h2>Что получил пользователь</h2></div>' +
+      '<div class="quote full" style="margin-top:14px;font-size:16px">' + esc(tr.finalAnswer) + '</div></div>' : '') +
+    '<div class="section"><div class="section-head"><h2>Сырые записи</h2>' +
+      '<span class="hint">' + tr.records.length + ' шт. в этом трейсе</span></div>' +
+      '<div class="rawbar">' +
+        '<input id="q" placeholder="поиск по тексту сообщения…">' +
+        '<select id="fapp"></select><select id="flvl"></select>' +
+      '</div><div id="rawtable"></div></div>';
+
+  wireRaw(tr);
+}
+
+function wireRaw(tr){
+  const apps = Array.from(new Set(tr.records.map(r => r.app))).sort();
+  const lvls = Array.from(new Set(tr.records.map(r => r.level))).sort();
+  $('#fapp').innerHTML = '<option value="">все сервисы</option>' + apps.map(a => '<option>' + esc(a) + '</option>').join('');
+  $('#flvl').innerHTML = '<option value="">все уровни</option>' + lvls.map(a => '<option>' + esc(a) + '</option>').join('');
+
+  function draw(){
+    const q = $('#q').value.trim().toLowerCase();
+    const fa = $('#fapp').value, fl = $('#flvl').value;
+    const rows = tr.records.filter(r =>
+      (!fa || r.app === fa) && (!fl || r.level === fl) && (!q || r.msg.toLowerCase().indexOf(q) >= 0));
+    const cap = rows.slice(0, 400);
+    $('#rawtable').innerHTML =
+      '<table class="raw"><thead><tr><th>время</th><th>сервис</th><th>ур.</th><th>сообщение</th></tr></thead><tbody>' +
+      cap.map(r => '<tr><td>' + esc(r.t ? r.t.toLocaleTimeString('ru-RU') + '.' + String(r.t.getMilliseconds()).padStart(3, '0') : '—') + '</td>' +
+        '<td>' + esc(r.app.replace(/^alfagen-/, '')) + '</td>' +
+        '<td class="lvl lvl-' + esc(r.level) + '">' + esc(r.level) + '</td>' +
+        '<td class="msg">' + esc(r.msg.length > 1400 ? r.msg.slice(0, 1400) + ' …' : r.msg) + '</td></tr>').join('') +
+      '</tbody></table>' +
+      (rows.length > cap.length ? '<div class="empty">Показано 400 из ' + rows.length + ". Уточните фильтр.</div>" :
+       rows.length ? '' : '<div class="empty">Ничего не найдено.</div>');
+  }
+  ['#q','#fapp','#flvl'].forEach(s => { $(s).oninput = draw; $(s).onchange = draw; });
+  draw();
+}
+</script>
+</body>
+</html>
