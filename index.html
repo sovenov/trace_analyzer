@@ -3,24 +3,27 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate, max-age=0">
+<meta http-equiv="Pragma" content="no-cache">
+<meta http-equiv="Expires" content="0">
 <title>Разбор трейса — AIAD_CHAT</title>
 <style>
 :root{
-  --ground:#E9EAE5;
-  --paper:#F6F6F2;
-  --paper-2:#FDFDFB;
-  --ink:#16181A;
-  --ink-soft:#4A4E4B;
-  --muted:#797D78;
-  --rule:#C9CBC4;
-  --rule-soft:#DEDFD9;
-  --navy:#1B3A5C;
-  --crimson:#A3003F;
-  --forest:#2A6249;
-  --amber:#7E6210;
-  --violet:#4B3A78;
-  --serif:Georgia,"Iowan Old Style","Times New Roman",serif;
-  --sans:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;
+  --ground:#F8FAFD;
+  --paper:#F1F3F4;
+  --paper-2:#FFFFFF;
+  --ink:#1F1F1F;
+  --ink-soft:#3C4043;
+  --muted:#5F6368;
+  --rule:#DADCE0;
+  --rule-soft:#E8EAED;
+  --navy:#0B57D0;
+  --crimson:#B3261E;
+  --forest:#137333;
+  --amber:#B06000;
+  --violet:#7B1FA2;
+  --serif:"Google Sans",Roboto,Arial,sans-serif;
+  --sans:"Google Sans Text",Roboto,Arial,sans-serif;
   --mono:ui-monospace,"SF Mono","Cascadia Mono","JetBrains Mono",Menlo,Consolas,monospace;
 }
 *{box-sizing:border-box}
@@ -301,6 +304,188 @@ table.raw tr:hover td{background:var(--paper)}
   .row{animation:fade .28s ease-out both}
   @keyframes fade{from{opacity:0;transform:translateY(3px)}to{opacity:1;transform:none}}
 }
+
+/* ---------- clean Google-inspired theme ---------- */
+::selection{background:#D3E3FD;color:var(--ink)}
+body{background:var(--ground);letter-spacing:.01em}
+.wrap{max-width:1200px;padding:32px 24px 96px}
+
+.masthead{
+  align-items:center;gap:12px;border:0;padding:0 0 20px;margin-bottom:20px;
+}
+.masthead h1{
+  font-size:28px;font-weight:500;line-height:1.2;letter-spacing:-.02em;
+}
+.masthead .sub{
+  padding:5px 10px;border-radius:8px;background:#E8F0FE;color:var(--navy);
+  font-size:12px;font-weight:500;letter-spacing:.02em;text-transform:none;
+}
+
+.drop{
+  border:2px dashed #C4C7C5;border-radius:16px;background:var(--paper-2);
+  padding:40px 28px;transition:border-color .18s ease,background .18s ease,box-shadow .18s ease;
+}
+.drop:hover,.drop.hot{
+  border-color:var(--navy);background:#F5F8FF;box-shadow:0 1px 2px rgba(60,64,67,.08);
+}
+.drop h2{font-size:20px;font-weight:500;letter-spacing:-.01em;margin-bottom:7px}
+.drop p{font-size:13.5px;line-height:1.6}
+.drop code{color:var(--navy);background:#E8F0FE;border-radius:5px;padding:2px 5px}
+
+.files{margin-top:12px;gap:8px}
+.file-chip{
+  min-height:32px;border-color:var(--rule);border-radius:18px;padding:5px 10px;
+  background:var(--paper-2);box-shadow:0 1px 2px rgba(60,64,67,.05);
+}
+.file-chip .ord{
+  min-width:18px;height:18px;display:inline-grid;place-items:center;border-radius:50%;
+  padding:0;background:var(--navy);
+}
+.file-chip.bad{border-color:#F2B8B5;background:#FCE8E6}
+.reset{
+  min-height:32px;border-color:var(--rule);border-radius:18px;padding:5px 14px;
+  background:var(--paper-2);color:var(--navy);font-weight:500;
+}
+.reset:hover{border-color:#AECBFA;background:#E8F0FE;color:var(--navy)}
+
+.tabs{gap:6px;margin-top:24px;border:0}
+.tab{
+  border:0;border-radius:20px;padding:8px 14px;background:transparent;
+  font-family:var(--sans);font-size:12.5px;font-weight:500;color:var(--muted);
+}
+.tab:hover{background:var(--paper)}
+.tab[aria-selected="true"]{
+  margin-bottom:0;border:0;background:#D3E3FD;color:#041E49;
+}
+
+.dossier{margin-top:30px}
+.eyebrow{
+  margin-bottom:10px;color:var(--navy);font-size:11px;font-weight:600;
+  letter-spacing:.1em;
+}
+.question{font-size:30px;line-height:1.32;font-weight:400;letter-spacing:-.025em;margin-bottom:20px}
+.question .q-mark{color:#AECBFA;font-size:32px}
+.idbar{
+  border-color:var(--rule);border-radius:14px;background:var(--paper-2);
+  box-shadow:0 1px 2px rgba(60,64,67,.08);overflow:hidden;
+}
+.idcell{padding:12px 15px;border-color:var(--rule-soft)}
+.idcell dt{font-size:10px;font-weight:600;letter-spacing:.1em}
+.idcell dd{font-size:12px;color:var(--ink-soft)}
+
+.verdict{
+  margin-top:20px;border-color:var(--rule);border-radius:14px;background:var(--paper-2);
+  box-shadow:0 1px 2px rgba(60,64,67,.08);overflow:hidden;
+}
+.verdict-head{
+  padding:12px 16px;background:#F8FAFD;border-color:var(--rule-soft);
+  color:var(--ink-soft);font-weight:600;letter-spacing:.1em;
+}
+.finding{gap:13px;padding:12px 16px;border-color:var(--rule-soft)}
+.finding .dot{width:8px;height:8px;margin-top:6px}
+.finding code{background:var(--paper);border-radius:5px;padding:2px 5px}
+
+.stats{gap:10px;margin-top:12px}
+.stat{
+  border-color:var(--rule);border-radius:14px;background:var(--paper-2);padding:14px 16px;
+  box-shadow:0 1px 2px rgba(60,64,67,.05);
+}
+.stat .v{font-size:25px;font-weight:500;color:var(--ink)}
+.stat .k{font-size:10px;font-weight:600;letter-spacing:.09em}
+.stat.hl{border-color:#F2B8B5;background:#FFF8F7}
+.stat.hl .v{color:var(--crimson)}
+
+.section{margin-top:36px}
+.section-head{
+  align-items:center;gap:12px;border-color:var(--rule);padding-bottom:10px;margin-bottom:5px;
+}
+.section-head h2{font-size:21px;font-weight:500;letter-spacing:-.01em}
+.section-head .hint{font-size:12px;line-height:1.45}
+
+.row{
+  grid-template-columns:62px minmax(0,1fr) 196px;border-color:var(--rule-soft);
+  border-radius:9px;transition:background .15s ease;
+}
+.row:hover{background:#F1F5FB}
+.row .clock{padding:14px 9px 14px 0;font-size:11px}
+.row .body{padding:12px 14px 13px 2px}
+.row .track{padding:17px 2px 14px 0}
+.body>.inner::before{background:#BDC1C6}
+.chip{
+  border-radius:10px;padding:2px 7px;font-size:9px;letter-spacing:.08em;
+}
+.c-mcp{background:#FCE8E6}
+.c-ans{border-color:var(--navy);background:var(--navy)}
+.c-err{background:var(--crimson)}
+.title{font-size:14px}
+.meta{color:var(--muted)}
+.quote{
+  margin-top:8px;padding:9px 12px;border-left:3px solid #AECBFA;border-radius:0 8px 8px 0;
+  background:#F8FAFD;font-size:14.5px;line-height:1.6;
+}
+details.pay>summary{
+  border-color:var(--rule);border-radius:8px;padding:4px 9px;background:var(--paper-2);
+}
+details.pay>summary:hover{border-color:#AECBFA;background:#F5F8FF}
+pre.json{
+  border-color:var(--rule-soft);border-radius:10px;background:#F8FAFD;padding:12px 14px;
+}
+
+.bar{height:6px;border-radius:6px;background:#E1E5EA}
+.bar span{height:6px;border-radius:6px;background:var(--navy)}
+.dur{font-size:10px}
+
+.tools{gap:7px}
+.tool{
+  border-color:var(--rule);border-radius:16px;background:var(--paper-2);padding:5px 10px;
+}
+.tool.used{border-color:#F2B8B5;background:#FCE8E6}
+.tool.planned{border-color:#F9AB00;background:var(--paper-2)}
+
+.rawbar{gap:10px;margin-top:16px}
+.rawbar input,.rawbar select{
+  min-height:40px;border-color:var(--rule);border-radius:10px;background:var(--paper-2);
+  padding:8px 12px;
+}
+.rawbar input:hover,.rawbar select:hover{border-color:#BDC1C6}
+.rawbar input:focus,.rawbar select:focus{
+  outline:0;border-color:var(--navy);box-shadow:0 0 0 1px var(--navy);
+}
+table.raw{border:1px solid var(--rule);border-radius:12px;border-collapse:separate;border-spacing:0;overflow:hidden}
+table.raw th{padding:9px 10px;border-color:var(--rule);background:#F8FAFD}
+table.raw td{padding:8px 10px;border-color:var(--rule-soft)}
+table.raw tr:last-child td{border-bottom:0}
+table.raw tr:hover td{background:#F1F5FB}
+
+.empty{padding:36px 0}
+.err-box{
+  border-color:#F2B8B5;border-radius:12px;background:#FCE8E6;padding:13px 16px;
+}
+
+.drop:focus-visible,.reset:focus-visible,.tab:focus-visible,details.pay>summary:focus-visible{
+  outline:3px solid #AECBFA;outline-offset:2px;
+}
+
+@media (max-width:820px){
+  .wrap{padding:22px 16px 64px}
+  .masthead{padding-bottom:16px}
+  .masthead h1{font-size:25px}
+  .drop{padding:32px 20px}
+  .question{font-size:24px}
+  .row{grid-template-columns:48px minmax(0,1fr)}
+  .idcell{flex-basis:50%}
+}
+@media (max-width:560px){
+  .masthead{align-items:flex-start;flex-direction:column;gap:8px}
+  .masthead .sub{line-height:1.45}
+  .drop{padding:28px 16px}
+  .drop h2{font-size:18px}
+  .idcell{flex-basis:100%;border-right:0;border-bottom:1px solid var(--rule-soft)}
+  .idcell:last-child{border-bottom:0}
+  .stats{display:grid;grid-template-columns:repeat(2,minmax(0,1fr))}
+  .stat{min-width:0}
+  .section-head{align-items:flex-start;flex-direction:column;gap:3px}
+}
 </style>
 </head>
 <body>
@@ -308,7 +493,6 @@ table.raw tr:hover td{background:var(--paper)}
 
   <div class="masthead">
     <h1>Разбор трейса</h1>
-    <span class="sub">AIAD_CHAT · Kibana → цепочка решений агента</span>
   </div>
 
   <label class="drop" id="drop" tabindex="0" role="button">
@@ -416,6 +600,16 @@ function extractUser(msg, app){
     if(o && o.input_value){
       return {text: o.input_value, session: o.session_id, cus: o.customer_id,
               channel: o.source_channel_id, os: o.operation_system, segment: o.segment};
+    }
+    // response-shaped access log: question sits in outputs[].inputs.input_value
+    if(o && Array.isArray(o.outputs) && o.outputs[0] && o.outputs[0].inputs && o.outputs[0].inputs.input_value){
+      return {text: o.outputs[0].inputs.input_value, session: o.session_id};
+    }
+    // body is frequently truncated mid-JSON, so parse fails — dig the value out directly
+    const iv = /"input_value"\s*:\s*"((?:[^"\\]|\\.)*)"/.exec(msg);
+    if(iv && iv[1].trim()){
+      const sid = /"session_id"\s*:\s*"([^"]*)"/.exec(msg);
+      return {text: unesc(iv[1]), session: sid && sid[1]};
     }
   }
   if(app === 'alfagen-compliance-api'){
@@ -574,6 +768,31 @@ function extractFinalAnswer(msg, app){
     if(m) return {session: m[1], text: m[2]};
   }
   return null;
+}
+
+/* Answers now arrive as a structured "assembly" (message bubbles + chip buttons)
+   instead of plain text. Flatten it to what the user actually saw. */
+function humanizeAnswer(txt, depth){
+  depth = depth || 0;
+  const o = safeJson(txt);
+  if(!(o && o.type === 'assembly' && Array.isArray(o.children))) return txt;
+  const bubbles = [], chips = [];
+  (function walk(nodes){
+    nodes.forEach(n => {
+      if(!n || typeof n !== 'object') return;
+      if(n.type === 'message' && n.body && n.body.text){
+        let t = String(n.body.text);
+        // a bubble's text is sometimes itself a serialized assembly — unwrap it
+        if(depth < 4 && /"type"\s*:\s*"assembly"/.test(t)) t = humanizeAnswer(t, depth + 1);
+        bubbles.push(t);
+      }
+      else if(n.type === 'chips' && n.body && n.body.text) chips.push(String(n.body.text));
+      if(Array.isArray(n.children)) walk(n.children);
+    });
+  })(o.children);
+  let out = bubbles.join('\n\n');
+  if(chips.length) out += (out ? '\n\n' : '') + 'Кнопки: ' + chips.join(' · ');
+  return out || txt;
 }
 
 function extractDelivery(msg){
@@ -777,7 +996,7 @@ function buildOne(traceId, recs){
     // --- final answer + delivery
     const fa = extractFinalAnswer(msg, app);
     if(fa && fa.text && fa.text.trim()){
-      finalAnswer = fa.text.trim();
+      finalAnswer = humanizeAnswer(fa.text.trim()).trim();
       events.push({ts: r.ts, kind: 'answer', depth: 0, chip: 'Ответ', chipClass: 'c-ans',
                    title: 'Ответ отдан в сессию', quote: finalAnswer, app: app, full: true});
     }
@@ -1165,7 +1384,7 @@ function wireRaw(tr){
     const fa = $('#fapp').value, fl = $('#flvl').value;
     const rows = tr.records.filter(r =>
       (!fa || r.app === fa) && (!fl || r.level === fl) && (!q || r.msg.toLowerCase().indexOf(q) >= 0));
-    const cap = rows.slice(0, 400);
+    const cap = rows.slice(0, 2000);
     $('#rawtable').innerHTML =
       '<table class="raw"><thead><tr><th>время</th><th>сервис</th><th>ур.</th><th>сообщение</th></tr></thead><tbody>' +
       cap.map(r => '<tr><td>' + esc(r.t ? r.t.toLocaleTimeString('ru-RU') + '.' + String(r.t.getMilliseconds()).padStart(3, '0') : '—') + '</td>' +
@@ -1173,7 +1392,7 @@ function wireRaw(tr){
         '<td class="lvl lvl-' + esc(r.level) + '">' + esc(r.level) + '</td>' +
         '<td class="msg">' + esc(r.msg.length > 1400 ? r.msg.slice(0, 1400) + ' …' : r.msg) + '</td></tr>').join('') +
       '</tbody></table>' +
-      (rows.length > cap.length ? '<div class="empty">Показано 400 из ' + rows.length + ". Уточните фильтр.</div>" :
+      (rows.length > cap.length ? '<div class="empty">Показано 2000 из ' + rows.length + ". Уточните фильтр.</div>" :
        rows.length ? '' : '<div class="empty">Ничего не найдено.</div>');
   }
   ['#q','#fapp','#flvl'].forEach(s => { $(s).oninput = draw; $(s).onchange = draw; });
