@@ -6,7 +6,7 @@
 <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate, max-age=0">
 <meta http-equiv="Pragma" content="no-cache">
 <meta http-equiv="Expires" content="0">
-<title>Разбор трейса — AIAD_CHAT</title>
+<title>Разбор трейса</title>
 <style>
 :root{
   --ground:#F8FAFD;
@@ -499,7 +499,7 @@ table.raw tr:hover td{background:#F1F5FB}
 <div class="wrap">
 
   <div class="masthead">
-    <h1>Разбор трейса</h1>
+    <h1>Разбор трейса (локально в браузере)</h1>
   </div>
 
   <label class="drop" id="drop" tabindex="0" role="button">
@@ -853,6 +853,68 @@ function buildTraces(fileEntries){
   return {traces: traces, files: ordered, total: all.length};
 }
 
+/* verdict + counters over a scoped slice of events/records — run once for the whole
+   trace and again per user request, so each request gets its own findings and stats */
+function summarize(evs, rcs, ctx){
+  const mcpCalls = evs.filter(e => e.kind === 'mcp');
+  const ragHits = evs.filter(e => e.kind === 'rag' && e.chunks != null);
+  const subCalls = evs.filter(e => e.kind === 'subagent' && e.phase === 'in');
+  const calledSubs = Array.from(new Set(subCalls.map(e => e.name)));
+  const calledMcp = Array.from(new Set(mcpCalls.map(e => e.name)));
+  const plan = ctx.plan, allAvailable = ctx.allAvailable || [];
+  const finalAnswer = ctx.finalAnswer, delivered = ctx.delivered;
+  const errs = ctx.errs || [];
+  const errTotal = errs.reduce((a, g) => a + g.count, 0);
+
+  const findings = [];
+  if(!ctx.userQ) findings.push({level: 'note', text: 'Текст запроса пользователя в этих файлах не найден — возможно, не хватает более ранней страницы выгрузки.'});
+  if(!mcpCalls.length){
+    findings.push({level: 'warn', text: 'Ни одного результативного вызова MCP-инструмента. Агент не дошёл до данных — смотрите маршрутизацию, а не адаптер.'});
+  } else {
+    findings.push({level: 'ok', text: 'Вызовов MCP-инструментов: <b>' + mcpCalls.length + '</b> (' + calledMcp.map(n => '<code>' + n + '</code>').join(', ') + ').'});
+  }
+  if(plan){
+    const planned = (plan.steps || []).reduce((a, s) => a.concat(s.tools || []), []);
+    const missed = planned.filter(t => calledSubs.indexOf(t) < 0);
+    if(missed.length){
+      findings.push({level: 'warn', text: 'Планировщик назначил ' + planned.map(t => '<code>' + t + '</code>').join(', ') +
+        ', но так и не вызваны: ' + missed.map(t => '<code>' + t + '</code>').join(', ') + '.'});
+    }
+  }
+  if(ragHits.length){
+    findings.push({level: 'ok', text: 'RAG отработал: получено чанков — <b>' + ragHits.map(e => e.chunks).join(', ') + '</b>.'});
+  } else {
+    findings.push({level: 'note', text: 'В RAG агент не ходил.'});
+  }
+  if(allAvailable.length && calledMcp.length){
+    const unused = allAvailable.length - calledMcp.length;
+    if(unused > 0) findings.push({level: 'note', text: 'Инструментов было доступно <b>' + allAvailable.length + '</b>, задействован <b>' + calledMcp.length + '</b>.'});
+  }
+  if(finalAnswer && REFUSAL.some(re => re.test(finalAnswer))){
+    findings.push({level: 'warn', text: 'В финальном ответе есть признаки отказа («нет данных», «к сожалению») — пользователь, скорее всего, ушёл ни с чем.'});
+  }
+  if(errTotal){
+    findings.push({level: 'warn', text: 'Записей уровня ERROR/WARN: <b>' + errTotal +
+      '</b> в <b>' + errs.length + '</b> различных видах — вынесены в отдельный раздел ниже.'});
+  }
+  if(delivered) findings.push({level: 'ok', text: 'Ответ доставлен в чат.'});
+  else if(finalAnswer) findings.push({level: 'note', text: 'Подтверждения доставки в bot-conversation-api нет.'});
+
+  return {
+    findings: findings,
+    calledMcp: calledMcp, calledSubs: calledSubs,
+    plannedSubs: plan ? (plan.steps || []).reduce((a, s) => a.concat(s.tools || []), []) : [],
+    stats: {
+      records: rcs.length,
+      mcp: mcpCalls.length,
+      rag: ragHits.reduce((a, e) => a + e.chunks, 0),
+      llm: evs.filter(e => e.kind === 'llm').length,
+      subs: subCalls.length,
+      seconds: ctx.seconds
+    }
+  };
+}
+
 function buildOne(traceId, recs){
   const t0 = recs.length ? recs[0].ts : 0;
   const t1 = recs.length ? recs[recs.length - 1].ts : 0;
@@ -920,6 +982,7 @@ function buildOne(traceId, recs){
 
         if(cls.tag === 'plan'){
           plan = cls.data;
+          ev.planData = cls.data;
           const tools = (cls.data.steps || []).reduce((acc, s) => acc.concat(s.tools || []), []);
           ev.planTools = tools;
           ev.meta = 'route=' + (cls.data.route || '?') + (tools.length ? ' · инструменты: ' + tools.join(', ') : '');
@@ -1061,9 +1124,9 @@ function buildOne(traceId, recs){
       .replace(/\*MASKED_[A-Z_]+\*/g, '\u00b7')
       .replace(/[0-9a-f\u00b7\-]{8,}/gi, '\u00b7').slice(0, 90);
     const g = errorGroups.get(sig);
-    if(g){ g.count++; g.last = e.ts; }
+    if(g){ g.count++; g.last = e.ts; g.tsList.push(e.ts); }
     else errorGroups.set(sig, {count: 1, first: e.ts, last: e.ts, level: e.chip,
-                              logger: e.title, sample: e.quote || '', app: e.app});
+                              logger: e.title, sample: e.quote || '', app: e.app, tsList: [e.ts]});
     return false;
   });
 
@@ -1125,57 +1188,42 @@ function buildOne(traceId, recs){
   clean.forEach(e => { e.rel = (e.ts - t0) / 1000; });
   clean = clean.filter(e => e.ts <= tEnd + 1000);
 
-  // ---- verdict
-  const findings = [];
-  if(!userQ) findings.push({level: 'note', text: 'Текст запроса пользователя в этих файлах не найден — возможно, не хватает более ранней страницы выгрузки.'});
-  if(!mcpCalls.length){
-    findings.push({level: 'warn', text: 'Ни одного результативного вызова MCP-инструмента. Агент не дошёл до данных — смотрите маршрутизацию, а не адаптер.'});
-  } else {
-    findings.push({level: 'ok', text: 'Вызовов MCP-инструментов: <b>' + mcpCalls.length + '</b> (' + calledMcp.map(n => '<code>' + n + '</code>').join(', ') + ').'});
-  }
-  if(plan){
-    const planned = (plan.steps || []).reduce((a, s) => a.concat(s.tools || []), []);
-    const missed = planned.filter(t => calledSubs.indexOf(t) < 0);
-    if(missed.length){
-      findings.push({level: 'warn', text: 'Планировщик назначил ' + planned.map(t => '<code>' + t + '</code>').join(', ') +
-        ', но так и не вызваны: ' + missed.map(t => '<code>' + t + '</code>').join(', ') + '.'});
-    }
-  }
-  if(ragHits.length){
-    findings.push({level: 'ok', text: 'RAG отработал: получено чанков — <b>' + ragHits.map(e => e.chunks).join(', ') + '</b>.'});
-  } else {
-    findings.push({level: 'note', text: 'В RAG агент не ходил.'});
-  }
-  if(allAvailable.length && calledMcp.length){
-    const unused = allAvailable.length - calledMcp.length;
-    if(unused > 0) findings.push({level: 'note', text: 'Инструментов было доступно <b>' + allAvailable.length + '</b>, задействован <b>' + calledMcp.length + '</b>.'});
-  }
-  if(finalAnswer && REFUSAL.some(re => re.test(finalAnswer))){
-    findings.push({level: 'warn', text: 'В финальном ответе есть признаки отказа («нет данных», «к сожалению») — пользователь, скорее всего, ушёл ни с чем.'});
-  }
   const errs = Array.from(errorGroups.values()).sort((a, b) => b.count - a.count);
   const errTotal = errs.reduce((a, g) => a + g.count, 0);
-  if(errTotal){
-    findings.push({level: 'warn', text: 'Записей уровня ERROR/WARN: <b>' + errTotal +
-      '</b> в <b>' + errs.length + '</b> различных видах — вынесены в отдельный раздел ниже.'});
-  }
-  if(delivered) findings.push({level: 'ok', text: 'Ответ доставлен в чат.'});
-  else if(finalAnswer) findings.push({level: 'note', text: 'Подтверждения доставки в bot-conversation-api нет.'});
+
+  // ---- verdict + stats: once for the whole trace ("Все"), once per user request
+  const segOf = ts => {
+    let idx = 0;
+    for(let i = 0; i < userQs.length; i++){ if(ts >= userQs[i].ts) idx = i; else break; }
+    return idx;
+  };
+  const agg = summarize(clean, recs, {userQ: userQ, plan: plan, finalAnswer: finalAnswer,
+    delivered: delivered, allAvailable: allAvailable, errs: errs, seconds: meta.durationMs / 1000});
+
+  const segments = userQs.map((q, i) => {
+    const segEvents = clean.filter(e => segOf(e.ts) === i);
+    const segRecs = recs.filter(r => segOf(r.ts) === i);
+    const planEv = segEvents.filter(e => e.tag === 'plan').pop();
+    const ansEv = segEvents.filter(e => e.kind === 'answer' && e.quote).pop();
+    const segAnswer = ansEv ? ansEv.quote : null;
+    const segDelivered = segEvents.some(e => e.kind === 'answer' && /отправлен пользователю/.test(e.title || ''));
+    const segErrs = errs.map(g => Object.assign({}, g, {count: g.tsList.filter(ts => segOf(ts) === i).length}))
+                        .filter(g => g.count > 0);
+    const segEnd = segEvents.length ? segEvents[segEvents.length - 1].ts : q.ts;
+    const view = summarize(segEvents, segRecs, {userQ: q, plan: planEv ? planEv.planData : null,
+      finalAnswer: segAnswer, delivered: segDelivered, allAvailable: allAvailable,
+      errs: segErrs, seconds: Math.max((segEnd - q.ts) / 1000, 0)});
+    return {index: i, question: q, findings: view.findings, stats: view.stats,
+            finalAnswer: segAnswer, delivered: segDelivered};
+  });
 
   return {
     traceId: traceId, meta: meta, records: recs, events: clean,
     userQ: userQ, userQs: userQs, plan: plan, finalAnswer: finalAnswer, delivered: delivered,
     availableTools: allAvailable, calledMcp: calledMcp, calledSubs: calledSubs,
     plannedSubs: plan ? (plan.steps || []).reduce((a, s) => a.concat(s.tools || []), []) : [],
-    findings: findings, errors: errs, errorTotal: errTotal,
-    stats: {
-      records: recs.length,
-      mcp: mcpCalls.length,
-      rag: ragHits.reduce((a, e) => a + e.chunks, 0),
-      llm: clean.filter(e => e.kind === 'llm').length,
-      subs: subCalls.length,
-      seconds: (meta.durationMs / 1000)
-    }
+    findings: agg.findings, errors: errs, errorTotal: errTotal,
+    stats: agg.stats, segments: segments
   };
 }
 // ==== PARSER:END ====
@@ -1298,17 +1346,22 @@ function renderReport(){
     ['длительность', (m.durationMs / 1000).toFixed(1) + ' с']
   ].map(p => '<div class="idcell"><dt>' + esc(p[0]) + '</dt><dd>' + esc(p[1]) + '</dd></div>').join('');
 
-  const findings = tr.findings.map(f =>
-    '<div class="finding ' + f.level + '"><span class="dot"></span><div>' + f.text + '</div></div>').join('');
-
-  const stats = [
-    ['зап. в трейсе', tr.stats.records, ''],
-    ['ходов LLM', tr.stats.llm, ''],
-    ['саб-агентов', tr.stats.subs, ''],
-    ['вызовов MCP', tr.stats.mcp, tr.stats.mcp === 0 ? 'hl' : ''],
-    ['чанков RAG', tr.stats.rag, ''],
-    ['секунд', tr.stats.seconds.toFixed(1), '']
-  ].map(s => '<div class="stat ' + s[2] + '"><div class="v">' + esc(s[1]) + '</div><div class="k">' + esc(s[0]) + '</div></div>').join('');
+  // verdict / stats / answer are rendered from a source so they can be swapped per request
+  const verdictHtml = f =>
+    '<div class="verdict"><div class="verdict-head">Что произошло</div>' +
+    f.map(x => '<div class="finding ' + x.level + '"><span class="dot"></span><div>' + x.text + '</div></div>').join('') +
+    '</div>';
+  const statsHtml = st => '<div class="stats">' + [
+    ['зап. в трейсе', st.records, ''],
+    ['ходов LLM', st.llm, ''],
+    ['саб-агентов', st.subs, ''],
+    ['вызовов MCP', st.mcp, st.mcp === 0 ? 'hl' : ''],
+    ['чанков RAG', st.rag, ''],
+    ['секунд', st.seconds.toFixed(1), '']
+  ].map(s => '<div class="stat ' + s[2] + '"><div class="v">' + esc(s[1]) + '</div><div class="k">' + esc(s[0]) + '</div></div>').join('') + '</div>';
+  const answerHtml = ans => ans ?
+    '<div class="section"><div class="section-head"><h2>Что получил пользователь</h2></div>' +
+    '<div class="quote full" style="margin-top:14px;font-size:16px">' + esc(ans) + '</div></div>' : '';
 
   // one traceId can carry several user questions; split the chronicle by them
   const questions = (tr.userQs && tr.userQs.length) ? tr.userQs : (tr.userQ ? [tr.userQ] : []);
@@ -1365,6 +1418,19 @@ function renderReport(){
       }).join('') +
     '</div>' : '';
 
+  // per-request swappable blocks (aggregate "all" + one per question); default request 0 visible
+  const segs = tr.segments || [];
+  const seg = (id, html) => '<div data-segblock="' + id + '"' + (String(id) === '0' ? '' : ' class="hidden"') + '>' + html + '</div>';
+  const verdictBlock = multiQ
+    ? seg('all', verdictHtml(tr.findings)) + segs.map(s => seg(s.index, verdictHtml(s.findings))).join('')
+    : verdictHtml(tr.findings);
+  const statsBlock = multiQ
+    ? seg('all', statsHtml(tr.stats)) + segs.map(s => seg(s.index, statsHtml(s.stats))).join('')
+    : statsHtml(tr.stats);
+  const answerBlock = multiQ
+    ? seg('all', answerHtml(tr.finalAnswer)) + segs.map(s => seg(s.index, answerHtml(s.finalAnswer))).join('')
+    : answerHtml(tr.finalAnswer);
+
   const toolInv = tr.availableTools.length ? (
     '<div class="section"><div class="section-head"><h2>Инструменты</h2>' +
     '<span class="hint">красным — вызванные, жёлтым — назначенные планировщиком, но не вызванные</span></div>' +
@@ -1385,11 +1451,11 @@ function renderReport(){
       qBlock +
       '<div class="idbar">' + idcells + '</div>' +
     '</div>' +
-    '<div class="verdict"><div class="verdict-head">Что произошло</div>' + findings + '</div>' +
-    '<div class="stats">' + stats + '</div>' +
+    (multiQ ? segTabs : '') +
+    verdictBlock +
+    statsBlock +
     '<div class="section"><div class="section-head"><h2>Хроника</h2>' +
-      '<span class="hint">' + (multiQ ? 'в трейсе несколько запросов — переключайте вкладки' : 'отступ — глубина вызова, полоса справа — время') + '</span></div>' +
-      segTabs +
+      '<span class="hint">' + (multiQ ? 'в трейсе несколько запросов — переключайте вкладки сверху' : 'отступ — глубина вызова, полоса справа — время') + '</span></div>' +
       '<div class="spine" id="spine">' + (rows || '<div class="empty">Значимых событий не найдено.</div>') + '</div></div>' +
     toolInv +
     (tr.errors.length ? '<div class="section"><div class="section-head"><h2>Сбои и предупреждения</h2>' +
@@ -1399,8 +1465,7 @@ function renderReport(){
         '<b>' + esc(g.level) + ' ×' + g.count + '</b> · <code>' + esc(String(g.logger).split('.').pop()) + '</code>' +
         '<div class="meta" style="margin-top:4px">' + esc(g.sample.replace(/\s+/g, ' ').slice(0, 260)) + '</div>' +
         '</div></div>').join('') + '</div></div>' : '') +
-    (tr.finalAnswer ? '<div class="section"><div class="section-head"><h2>Что получил пользователь</h2></div>' +
-      '<div class="quote full" style="margin-top:14px;font-size:16px">' + esc(tr.finalAnswer) + '</div></div>' : '') +
+    answerBlock +
     '<div class="section"><div class="section-head"><h2>Сырые записи</h2>' +
       '<span class="hint">' + tr.records.length + ' шт. в этом трейсе</span></div>' +
       '<div class="rawbar">' +
@@ -1412,14 +1477,16 @@ function renderReport(){
   wireRaw(tr);
 }
 
-/* segment the chronicle by user request when a traceId holds several */
+/* switch the whole report (verdict, stats, chronicle, answer) between requests */
 function wireChronicle(){
   const tabs = $('#segtabs');
   if(!tabs) return;
   const rows = Array.from(document.querySelectorAll('#spine .row'));
+  const blocks = Array.from(document.querySelectorAll('[data-segblock]'));
   function select(seg){
     tabs.querySelectorAll('.tab').forEach(b => b.setAttribute('aria-selected', String(b.dataset.seg === seg)));
     rows.forEach(r => r.classList.toggle('hidden', seg !== 'all' && r.dataset.seg !== seg));
+    blocks.forEach(b => b.classList.toggle('hidden', b.dataset.segblock !== seg));
   }
   tabs.querySelectorAll('.tab').forEach(b => b.onclick = () => select(b.dataset.seg));
   select('0');
