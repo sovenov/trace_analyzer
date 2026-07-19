@@ -364,7 +364,14 @@ body{background:var(--ground);letter-spacing:.01em}
   letter-spacing:.1em;
 }
 .question{font-size:30px;line-height:1.32;font-weight:400;letter-spacing:-.025em;margin-bottom:20px}
+.question+.question{margin-top:-8px}
 .question .q-mark{color:#AECBFA;font-size:32px}
+.question .q-num{
+  display:inline-flex;align-items:center;justify-content:center;
+  width:26px;height:26px;border-radius:50%;margin-right:10px;vertical-align:3px;
+  background:#D3E3FD;color:#041E49;font-size:14px;font-weight:600;letter-spacing:0;
+}
+.segtabs{margin-top:14px !important}
 .idbar{
   border-color:var(--rule);border-radius:14px;background:var(--paper-2);
   box-shadow:0 1px 2px rgba(60,64,67,.08);overflow:hidden;
@@ -855,6 +862,7 @@ function buildOne(traceId, recs){
   const availableTools = new Map();
   const spans = [];   // sub-agent [Request..Response] windows, for nesting
   let plan = null, finalAnswer = null, delivered = false, userQ = null;
+  const userQs = [];
   const seenMsgIds = new Map();
 
   // pass 1: request/response timing per LLM messageId (start = first sighting, end = "Answer is ready")
@@ -875,15 +883,21 @@ function buildOne(traceId, recs){
   recs.forEach(r => {
     const msg = r.msg, app = r.app;
 
-    // --- user question (fields arrive across several services; merge, don't overwrite)
+    // --- user question. The same question is reported by several services (merge
+    // those), but a genuinely new question text starts a new segment of the trace.
     const u = extractUser(msg, app);
     if(u && u.text && u.text.trim()){
-      if(!userQ){
-        userQ = u;
-        events.push({ts: r.ts, kind: 'user', depth: 0, chip: 'Запрос', chipClass: 'c-user',
-                     title: 'Сообщение пользователя', quote: u.text.trim(), app: app});
+      const text = u.text.trim();
+      const same = userQs.find(q => q.text.trim() === text);
+      if(same){
+        Object.keys(u).forEach(k => { if(!same[k] && u[k]) same[k] = u[k]; });
       } else {
-        Object.keys(u).forEach(k => { if(!userQ[k] && u[k]) userQ[k] = u[k]; });
+        u.ts = r.ts;
+        userQs.push(u);
+        if(!userQ) userQ = u;
+        events.push({ts: r.ts, kind: 'user', depth: 0, chip: 'Запрос', chipClass: 'c-user',
+                     title: 'Сообщение пользователя', quote: text, app: app,
+                     qIndex: userQs.length - 1});
       }
     }
     const ctx = (app === 'alfagen-strategy-api' && msg.indexOf('Incoming request') >= 0) ? extractContext(msg) : null;
@@ -1150,7 +1164,7 @@ function buildOne(traceId, recs){
 
   return {
     traceId: traceId, meta: meta, records: recs, events: clean,
-    userQ: userQ, plan: plan, finalAnswer: finalAnswer, delivered: delivered,
+    userQ: userQ, userQs: userQs, plan: plan, finalAnswer: finalAnswer, delivered: delivered,
     availableTools: allAvailable, calledMcp: calledMcp, calledSubs: calledSubs,
     plannedSubs: plan ? (plan.steps || []).reduce((a, s) => a.concat(s.tools || []), []) : [],
     findings: findings, errors: errs, errorTotal: errTotal,
@@ -1296,6 +1310,15 @@ function renderReport(){
     ['секунд', tr.stats.seconds.toFixed(1), '']
   ].map(s => '<div class="stat ' + s[2] + '"><div class="v">' + esc(s[1]) + '</div><div class="k">' + esc(s[0]) + '</div></div>').join('');
 
+  // one traceId can carry several user questions; split the chronicle by them
+  const questions = (tr.userQs && tr.userQs.length) ? tr.userQs : (tr.userQ ? [tr.userQ] : []);
+  const multiQ = questions.length > 1;
+  const segOf = ts => {
+    let idx = 0;
+    for(let i = 0; i < questions.length; i++){ if(ts >= questions[i].ts) idx = i; else break; }
+    return idx;
+  };
+
   const total = Math.max(m.durationMs, 1);
   const rows = tr.events.map(e => {
     const ind = e.depth * 26;
@@ -1321,10 +1344,26 @@ function renderReport(){
     if(e.result) inner += payloadBlock('ответ инструмента', e.result);
     if(e.payload) inner += payloadBlock('полезная нагрузка', e.payload);
 
-    return '<div class="row' + (e.minor ? ' minor' : '') + '"><div class="clock">' + esc(fmtRel(e.rel)) + '</div>' +
+    return '<div class="row' + (e.minor ? ' minor' : '') + '" data-seg="' + segOf(e.ts) + '"><div class="clock">' + esc(fmtRel(e.rel)) + '</div>' +
            '<div class="body d' + e.depth + '" style="--ind:' + ind + 'px"><div class="inner">' + inner + '</div></div>' +
            '<div class="track">' + bar + '</div></div>';
   }).join('');
+
+  const qBlock = questions.length ? questions.map((q, i) =>
+      '<p class="question">' + (multiQ ? '<span class="q-num">' + (i + 1) + '</span>' : '') +
+      '<span class="q-mark">«</span>' + esc(q.text.trim()) + '<span class="q-mark">»</span></p>'
+    ).join('') :
+    '<p class="question"><span class="q-mark">«</span>запрос не найден в выгрузке<span class="q-mark">»</span></p>';
+
+  const segTabs = multiQ ?
+    '<div class="tabs segtabs" id="segtabs" role="tablist">' +
+      '<button class="tab" data-seg="all" role="tab" aria-selected="false">Все</button>' +
+      questions.map((q, i) => {
+        const t = q.text.trim();
+        return '<button class="tab" data-seg="' + i + '" role="tab" aria-selected="' + (i === 0) + '">' +
+               '№' + (i + 1) + ' · ' + esc(t.slice(0, 36)) + (t.length > 36 ? '…' : '') + '</button>';
+      }).join('') +
+    '</div>' : '';
 
   const toolInv = tr.availableTools.length ? (
     '<div class="section"><div class="section-head"><h2>Инструменты</h2>' +
@@ -1342,17 +1381,16 @@ function renderReport(){
 
   host.innerHTML =
     '<div class="dossier">' +
-      '<div class="eyebrow">О чём спросили</div>' +
-      '<p class="question"><span class="q-mark">«</span>' +
-        esc(tr.userQ && tr.userQ.text ? tr.userQ.text.trim() : 'запрос не найден в выгрузке') +
-      '<span class="q-mark">»</span></p>' +
+      '<div class="eyebrow">О чём спросили' + (multiQ ? ' — запросов: ' + questions.length : '') + '</div>' +
+      qBlock +
       '<div class="idbar">' + idcells + '</div>' +
     '</div>' +
     '<div class="verdict"><div class="verdict-head">Что произошло</div>' + findings + '</div>' +
     '<div class="stats">' + stats + '</div>' +
     '<div class="section"><div class="section-head"><h2>Хроника</h2>' +
-      '<span class="hint">отступ — глубина вызова, полоса справа — время</span></div>' +
-      '<div class="spine">' + (rows || '<div class="empty">Значимых событий не найдено.</div>') + '</div></div>' +
+      '<span class="hint">' + (multiQ ? 'в трейсе несколько запросов — переключайте вкладки' : 'отступ — глубина вызова, полоса справа — время') + '</span></div>' +
+      segTabs +
+      '<div class="spine" id="spine">' + (rows || '<div class="empty">Значимых событий не найдено.</div>') + '</div></div>' +
     toolInv +
     (tr.errors.length ? '<div class="section"><div class="section-head"><h2>Сбои и предупреждения</h2>' +
       '<span class="hint">' + tr.errorTotal + ' записей, свёрнуты по одинаковым сигнатурам</span></div>' +
@@ -1370,7 +1408,21 @@ function renderReport(){
         '<select id="fapp"></select><select id="flvl"></select>' +
       '</div><div id="rawtable"></div></div>';
 
+  wireChronicle();
   wireRaw(tr);
+}
+
+/* segment the chronicle by user request when a traceId holds several */
+function wireChronicle(){
+  const tabs = $('#segtabs');
+  if(!tabs) return;
+  const rows = Array.from(document.querySelectorAll('#spine .row'));
+  function select(seg){
+    tabs.querySelectorAll('.tab').forEach(b => b.setAttribute('aria-selected', String(b.dataset.seg === seg)));
+    rows.forEach(r => r.classList.toggle('hidden', seg !== 'all' && r.dataset.seg !== seg));
+  }
+  tabs.querySelectorAll('.tab').forEach(b => b.onclick = () => select(b.dataset.seg));
+  select('0');
 }
 
 function wireRaw(tr){
