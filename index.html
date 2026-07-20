@@ -822,15 +822,30 @@ function extractDelivery(msg){
 /* ---- main build ------------------------------------------------------ */
 
 function buildTraces(fileEntries){
-  // filename unixtime decides file order; log timestamps decide event order
+  // Event order always comes from the logs' own @timestamp (see all.sort below).
+  // File order/numbering: sort by the real period each file covers (its earliest
+  // @timestamp), because the unixtime in the filename is only the download moment
+  // and can disagree with the actual log time. Filename unixtime is the fallback.
+  fileEntries.forEach(f => {
+    let min = Infinity, max = -Infinity;
+    (f.logs || []).forEach(l => {
+      const t = parseKibanaTs(l['@timestamp'] || l.timestamp);
+      if(t){ const ms = t.getTime(); if(ms < min) min = ms; if(ms > max) max = ms; }
+    });
+    f.logMinTs = min === Infinity ? null : min;
+    f.logMaxTs = max === -Infinity ? null : max;
+    f.nameKey = fileOrderKey(f.name);
+  });
   const ordered = fileEntries.slice().sort((a, b) => {
-    const ka = fileOrderKey(a.name), kb = fileOrderKey(b.name);
-    if(ka != null && kb != null) return ka - kb;
-    if(ka != null) return -1;
-    if(kb != null) return 1;
+    if(a.logMinTs != null && b.logMinTs != null) return a.logMinTs - b.logMinTs;
+    if(a.logMinTs != null) return -1;
+    if(b.logMinTs != null) return 1;
+    if(a.nameKey != null && b.nameKey != null) return a.nameKey - b.nameKey;
+    if(a.nameKey != null) return -1;
+    if(b.nameKey != null) return 1;
     return a.name.localeCompare(b.name);
   });
-  ordered.forEach((f, i) => { f.order = i + 1; f.key = fileOrderKey(f.name); });
+  ordered.forEach((f, i) => { f.order = i + 1; f.key = f.nameKey; });
 
   const seen = new Set();
   const all = [];
@@ -1293,11 +1308,21 @@ async function loadFiles(list){
 function renderFiles(files){
   const box = $('#files');
   if(!files.length){ box.innerHTML = ''; return; }
+  const dt = ms => new Date(ms).toLocaleString('ru-RU', {day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit'});
+  const tm = ms => new Date(ms).toLocaleTimeString('ru-RU', {hour: '2-digit', minute: '2-digit'});
   const chips = files.map(f => {
     if(f.bad) return '<span class="file-chip bad">' + esc(f.name) + ' — ' + esc(f.bad) + '</span>';
-    const when = f.key ? new Date(f.key).toLocaleString('ru-RU') : 'без метки времени';
-    return '<span class="file-chip"><span class="ord">' + f.order + '</span>' +
-           '<b>' + esc(f.name) + '</b>' + esc(when) + ' · ' + (f.logs ? f.logs.length : 0) + ' зап.' +
+    // show the period the logs actually cover, not when the file was downloaded
+    let period;
+    if(f.logMinTs != null){
+      const sameDay = new Date(f.logMinTs).toDateString() === new Date(f.logMaxTs).toDateString();
+      period = sameDay ? dt(f.logMinTs) + '–' + tm(f.logMaxTs) : dt(f.logMinTs) + ' – ' + dt(f.logMaxTs);
+    } else {
+      period = f.key ? 'скачан ' + new Date(f.key).toLocaleString('ru-RU') : 'без метки времени';
+    }
+    const dl = f.key ? 'скачан ' + new Date(f.key).toLocaleString('ru-RU') : '';
+    return '<span class="file-chip" title="' + esc(dl) + '"><span class="ord">' + f.order + '</span>' +
+           '<b>' + esc(f.name) + '</b>' + esc(period) + ' · ' + (f.logs ? f.logs.length : 0) + ' зап.' +
            (f.dupes ? ' · −' + f.dupes + ' дубл.' : '') + '</span>';
   }).join('');
   box.innerHTML = chips +
