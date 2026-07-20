@@ -350,11 +350,16 @@ body{background:var(--ground);letter-spacing:.01em}
 .reset.save{background:var(--navy);border-color:var(--navy);color:#fff}
 .reset.save:hover{background:#0A47B0;border-color:#0A47B0;color:#fff}
 
-.tabs{gap:6px;margin-top:24px;border:0}
+.tabs{gap:6px;margin-top:24px;border:0;align-items:center}
+.tabs-label{
+  flex-basis:100%;margin-bottom:2px;
+  color:var(--navy);font-size:11px;font-weight:600;letter-spacing:.1em;
+}
 .tab{
   border:0;border-radius:20px;padding:8px 14px;background:transparent;
   font-family:var(--sans);font-size:12.5px;font-weight:500;color:var(--muted);
 }
+.tab .tid{font-family:var(--mono);font-size:12px}
 .tab:hover{background:var(--paper)}
 .tab[aria-selected="true"]{
   margin-bottom:0;border:0;background:#D3E3FD;color:#041E49;
@@ -1389,9 +1394,10 @@ function renderTabs(){
   const tabs = $('#tabs');
   if(STATE.traces.length <= 1){ tabs.classList.add('hidden'); tabs.innerHTML = ''; return; }
   tabs.classList.remove('hidden');
-  tabs.innerHTML = STATE.traces.map((t, i) =>
-    '<button class="tab" role="tab" data-i="' + i + '" aria-selected="' + (i === STATE.active) + '">' +
-    esc(t.traceId.slice(0, 12)) + '… · ' + t.stats.records + ' зап.</button>').join('');
+  tabs.innerHTML = '<span class="tabs-label">TRACEID</span>' +
+    STATE.traces.map((t, i) =>
+    '<button class="tab" role="tab" data-i="' + i + '" title="' + esc(t.traceId) + '" aria-selected="' + (i === STATE.active) + '">' +
+    '<span class="tid">' + esc(t.traceId) + '</span> · ' + t.stats.records + ' зап.</button>').join('');
   tabs.querySelectorAll('.tab').forEach(b => b.onclick = () => {
     STATE.active = +b.dataset.i; renderTabs(); renderReport();
   });
