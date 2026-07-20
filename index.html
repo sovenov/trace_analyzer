@@ -347,6 +347,8 @@ body{background:var(--ground);letter-spacing:.01em}
   background:var(--paper-2);color:var(--navy);font-weight:500;
 }
 .reset:hover{border-color:#AECBFA;background:#E8F0FE;color:var(--navy)}
+.reset.save{background:var(--navy);border-color:var(--navy);color:#fff}
+.reset.save:hover{background:#0A47B0;border-color:#0A47B0;color:#fff}
 
 .tabs{gap:6px;margin-top:24px;border:0}
 .tab{
@@ -1233,7 +1235,7 @@ const $ = s => document.querySelector(s);
 const esc = s => String(s == null ? '' : s)
   .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 
-let STATE = {traces: [], files: [], active: 0};
+let STATE = {traces: [], files: [], active: 0, raw: [], brokenFiles: []};
 
 const drop = $('#drop'), picker = $('#picker');
 ['dragenter','dragover'].forEach(ev => drop.addEventListener(ev, e => {
@@ -1250,17 +1252,21 @@ async function loadFiles(list){
   const files = Array.from(list || []);
   if(!files.length) return;
   $('#fatal').innerHTML = '';
-  const entries = [], broken = [];
+  const entries = [], broken = [], raw = [];
   for(const f of files){
     try{
       const txt = await f.text();
-      const norm = normalizeFile(JSON.parse(txt));
+      const parsed = JSON.parse(txt);
+      const norm = normalizeFile(parsed);
       if(!norm){ broken.push({name: f.name, why: 'не найден массив logs'}); continue; }
       entries.push({name: f.name, logs: norm.logs, url: norm.url});
+      raw.push({name: f.name, json: parsed});   // keep the source for "Сохранить отчёт"
     }catch(err){
       broken.push({name: f.name, why: 'файл не разбирается как JSON'});
     }
   }
+  STATE.raw = raw;
+  STATE.brokenFiles = broken.slice();
   if(!entries.length){
     $('#fatal').innerHTML = '<div class="err-box">Ни один файл не удалось прочитать. Нужен JSON вида <code>{"logs":[…]}</code> — ровно то, что отдаёт выгрузка из Kibana.</div>';
     renderFiles(broken.map(b => ({name: b.name, bad: b.why})));
@@ -1289,14 +1295,94 @@ function renderFiles(files){
            '<b>' + esc(f.name) + '</b>' + esc(when) + ' · ' + (f.logs ? f.logs.length : 0) + ' зап.' +
            (f.dupes ? ' · −' + f.dupes + ' дубл.' : '') + '</span>';
   }).join('');
-  box.innerHTML = chips + '<button class="reset" id="reset">Очистить</button>';
+  box.innerHTML = chips +
+    (STATE.raw && STATE.raw.length ? '<button class="reset save" id="save">💾 Сохранить отчёт</button>' : '') +
+    '<button class="reset" id="reset">Очистить</button>';
   const r = $('#reset');
   if(r) r.onclick = () => {
-    STATE = {traces: [], files: [], active: 0};
+    STATE = {traces: [], files: [], active: 0, raw: [], brokenFiles: []};
     box.innerHTML = ''; $('#report').innerHTML = '';
     $('#tabs').classList.add('hidden'); $('#tabs').innerHTML = '';
     $('#fatal').innerHTML = ''; picker.value = '';
   };
+  const sv = $('#save');
+  if(sv) sv.onclick = saveReport;
+}
+
+/* Inner JS of the bootstrap embedded into a saved copy: on open it reads the
+   inlined logs and re-renders the whole report — same logic as make_report.py.
+   Set as a <script> element's textContent, so no closing-tag escaping is needed
+   here (there is deliberately no "</scr"+"ipt>" literal in this string). */
+const BOOTSTRAP_JS =
+'(function(){\n' +
+'  var node = document.getElementById("__TRACE_DATA__");\n' +
+'  if(!node) return;\n' +
+'  var payload;\n' +
+'  try { payload = JSON.parse(node.textContent); }\n' +
+'  catch(e){ document.getElementById("fatal").innerHTML = "<div class=\\"err-box\\">Встроенные данные повреждены: " + e + "</div>"; return; }\n' +
+'  var entries = [], broken = (payload.broken || []).slice();\n' +
+'  (payload.files || []).forEach(function(f){\n' +
+'    try {\n' +
+'      var norm = normalizeFile(f.json);\n' +
+'      if(!norm){ broken.push({name: f.name, why: "не найден массив logs"}); return; }\n' +
+'      entries.push({name: f.name, logs: norm.logs, url: norm.url});\n' +
+'    } catch(err){ broken.push({name: f.name, why: "ошибка разбора"}); }\n' +
+'  });\n' +
+'  var brokenChips = broken.map(function(b){ return {name: b.name, bad: b.why}; });\n' +
+'  if(!entries.length){ document.getElementById("fatal").innerHTML = "<div class=\\"err-box\\">Ни один файл логов не удалось прочитать.</div>"; renderFiles(brokenChips); return; }\n' +
+'  var built = buildTraces(entries);\n' +
+'  STATE.raw = payload.files || [];\n' +
+'  STATE.brokenFiles = (payload.broken || []).slice();\n' +
+'  STATE.traces = built.traces; STATE.files = built.files; STATE.active = 0;\n' +
+'  renderFiles(built.files.concat(brokenChips));\n' +
+'  renderTabs(); renderReport();\n' +
+'})();';
+
+function tstamp(){
+  const d = new Date(), p = n => String(n).padStart(2, '0');
+  return '' + d.getFullYear() + p(d.getMonth() + 1) + p(d.getDate()) +
+         '_' + p(d.getHours()) + p(d.getMinutes()) + p(d.getSeconds());
+}
+
+/* Snapshot the page into a single self-contained HTML with the loaded logs inlined.
+   We build the data + bootstrap as real DOM <script> nodes and append them to the
+   clone — no string surgery on the serialized HTML, so a stray body-close token
+   sitting inside this script's own source can never be matched by mistake. */
+function saveReport(){
+  if(!STATE.raw || !STATE.raw.length) return;
+
+  const clone = document.documentElement.cloneNode(true);
+  // drop anything from a previous save so re-saving a copy stays idempotent
+  clone.querySelectorAll('#__TRACE_DATA__, #__TRACE_BOOTSTRAP__').forEach(n => n.remove());
+  // blank runtime containers — the bootstrap refills them on open
+  ['#files', '#report', '#fatal'].forEach(sel => { const n = clone.querySelector(sel); if(n) n.innerHTML = ''; });
+  const tabsN = clone.querySelector('#tabs'); if(tabsN){ tabsN.innerHTML = ''; tabsN.classList.add('hidden'); }
+  const pick = clone.querySelector('#picker'); if(pick) pick.removeAttribute('value');
+  const body = clone.querySelector('body');
+
+  const dataScript = document.createElement('script');
+  dataScript.id = '__TRACE_DATA__';
+  dataScript.type = 'application/json';
+  // '</' -> '<\/' : keeps a literal closing tag inside the logs from ending the
+  // <script> early; JSON.parse turns '\/' back into '/' when the copy opens.
+  dataScript.textContent = JSON.stringify({
+    files: STATE.raw,
+    broken: (STATE.brokenFiles || []).map(b => ({name: b.name, why: b.why}))
+  }).replace(/<\//g, '<\\/');
+  body.appendChild(dataScript);
+
+  const bootScript = document.createElement('script');
+  bootScript.id = '__TRACE_BOOTSTRAP__';
+  bootScript.textContent = BOOTSTRAP_JS;
+  body.appendChild(bootScript);
+
+  const html = '<!DOCTYPE html>\n' + clone.outerHTML;
+  const blob = new Blob([html], {type: 'text/html;charset=utf-8'});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = 'trace_report_' + tstamp() + '.html';
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 4000);
 }
 
 function renderTabs(){
