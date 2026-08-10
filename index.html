@@ -456,6 +456,60 @@ pre.json{
 .tool.used{border-color:#F2B8B5;background:#FCE8E6}
 .tool.planned{border-color:#F9AB00;background:var(--paper-2)}
 
+/* ---------- sub-agents ---------- */
+.agents{display:flex;flex-direction:column;gap:10px;margin-top:14px}
+.agent{
+  border:1px solid var(--rule);border-radius:14px;background:var(--paper-2);
+  padding:12px 16px;box-shadow:0 1px 2px rgba(60,64,67,.05);
+}
+.agent.used{border-color:#AECBFA}
+.agent.planned{border-color:#F9AB00;background:#FFFCF5}
+.agent.root{background:#F8FAFD}
+.agent-top{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+.agent-name{font-family:var(--mono);font-size:13.5px;font-weight:600;color:var(--ink)}
+.agent-ms{margin-left:auto;font-family:var(--mono);font-size:11.5px;color:var(--muted)}
+.badge{
+  font-size:10px;font-weight:600;letter-spacing:.06em;text-transform:uppercase;
+  padding:3px 8px;border-radius:10px;border:1px solid;white-space:nowrap;
+}
+.badge.ok{color:var(--navy);border-color:#AECBFA;background:#E8F0FE}
+.badge.planned{color:var(--amber);border-color:#F9AB00;background:#FBF6E6}
+.badge.root{color:var(--muted);border-color:var(--rule);background:var(--paper)}
+.agent-tools{display:flex;flex-wrap:wrap;align-items:center;gap:7px;margin-top:10px}
+.al{
+  font-size:10px;font-weight:600;letter-spacing:.09em;text-transform:uppercase;color:var(--muted);
+}
+.al.none{text-transform:none;letter-spacing:0;font-weight:400;font-size:12.5px}
+
+/* ---------- MCP tools ---------- */
+.mcp-group{
+  margin-top:14px;border:1px solid var(--rule);border-radius:14px;background:var(--paper-2);
+  overflow:hidden;box-shadow:0 1px 2px rgba(60,64,67,.05);
+}
+.mcp-srv{
+  display:flex;align-items:baseline;gap:10px;flex-wrap:wrap;
+  padding:11px 16px;background:#F8FAFD;border-bottom:1px solid var(--rule-soft);
+}
+.mcp-srv .srv-name{font-family:var(--mono);font-size:13px;font-weight:600;color:var(--ink-soft)}
+.mcp-srv .srv-meta{font-size:11.5px;color:var(--muted)}
+.callrow{
+  display:flex;align-items:center;gap:10px;flex-wrap:wrap;
+  padding:9px 16px;border-bottom:1px solid var(--rule-soft);
+}
+.calls .callrow:last-child{border-bottom:0}
+.callmeta{font-family:var(--mono);font-size:11.5px;color:var(--muted)}
+.by{
+  margin-left:auto;display:flex;align-items:center;gap:6px;flex-wrap:wrap;
+  font-size:12px;color:var(--muted);
+}
+.by-agent{
+  font-family:var(--mono);font-size:11.5px;color:var(--navy);
+  border:1px solid #AECBFA;background:#E8F0FE;border-radius:16px;padding:3px 9px;
+}
+.by-n{font-family:var(--mono);font-size:11px;color:var(--muted);margin-left:-3px}
+details.pay.idle{margin:0;padding:11px 16px;border-top:1px solid var(--rule-soft)}
+details.pay.idle .tools{margin-top:10px}
+
 .rawbar{gap:10px;margin-top:16px}
 .rawbar input,.rawbar select{
   min-height:40px;border-color:var(--rule);border-radius:10px;background:var(--paper-2);
@@ -499,6 +553,9 @@ table.raw tr:hover td{background:#F1F5FB}
   .stats{display:grid;grid-template-columns:repeat(2,minmax(0,1fr))}
   .stat{min-width:0}
   .section-head{align-items:flex-start;flex-direction:column;gap:3px}
+  .agent-ms,.by{margin-left:0}
+  .by{width:100%}
+  .agent-name,.by-agent,.tool{word-break:break-word}
 }
 </style>
 </head>
@@ -1213,6 +1270,76 @@ function buildOne(traceId, recs){
   const errs = Array.from(errorGroups.values()).sort((a, b) => b.count - a.count);
   const errTotal = errs.reduce((a, g) => a + g.count, 0);
 
+  // ---- inventory: sub-agents apart from MCP tools, plus attribution "кто кого вызвал".
+  // Nesting by time containment already gave every event its host sub-agent (e.under);
+  // that host is the caller. Events without a host belong to the root agent.
+  const ROOT_AGENT = 'Основной агент';
+  const plannedNames = plan ? (plan.steps || []).reduce((a, s) => a.concat(s.tools || []), []) : [];
+  const serverOf = new Map();
+  availableTools.forEach((tools, srv) => tools.forEach(t => { if(!serverOf.has(t)) serverOf.set(t, srv); }));
+
+  const subInv = new Map();
+  const subOf = name => {
+    let s = subInv.get(name);
+    if(!s){ s = {name: name, calls: 0, ms: 0, planned: false, tools: new Map()}; subInv.set(name, s); }
+    return s;
+  };
+  // a planned name that is really an MCP tool belongs to the MCP list, not here
+  plannedNames.forEach(n => { if(allAvailable.indexOf(n) < 0) subOf(n).planned = true; });
+  clean.forEach(e => {
+    if(e.kind !== 'subagent') return;
+    const s = subOf(e.name);
+    if(e.phase === 'in') s.calls++;
+    else if(e.ms != null) s.ms += e.ms;
+  });
+
+  const mcpInv = new Map();
+  const mcpOf = name => {
+    let t = mcpInv.get(name);
+    if(!t){
+      t = {name: name, server: serverOf.get(name) || null, calls: 0, ms: 0,
+           planned: plannedNames.indexOf(name) >= 0, apps: [], callers: new Map()};
+      mcpInv.set(name, t);
+    }
+    return t;
+  };
+  allAvailable.forEach(t => mcpOf(t));
+  const rootTools = new Map();
+  clean.forEach(e => {
+    if(!e.name || (e.kind !== 'mcp' && e.kind !== 'mcpwrap')) return;
+    const t = mcpOf(e.name);
+    // adapter record: the call itself, with its own timing and server app;
+    // a LangFlow wrapper survives only when no adapter record matched it — then its
+    // Request is the call and its Response carries the round-trip time
+    if(e.kind === 'mcpwrap' && e.phase !== 'in'){ if(e.ms != null) t.ms += e.ms; return; }
+    t.calls++;
+    if(e.ms != null) t.ms += e.ms;
+    if(e.kind === 'mcp' && e.app && t.apps.indexOf(e.app) < 0) t.apps.push(e.app);
+    const who = e.under || ROOT_AGENT;
+    t.callers.set(who, (t.callers.get(who) || 0) + 1);
+    const bag = e.under ? subOf(e.under).tools : rootTools;
+    bag.set(e.name, (bag.get(e.name) || 0) + 1);
+  });
+
+  const countList = m => Array.from(m.entries()).map(p => ({name: p[0], count: p[1]}))
+    .sort((a, b) => b.count - a.count || a.name.localeCompare(b.name));
+  const subAgents = Array.from(subInv.values()).map(s => ({
+    name: s.name, calls: s.calls, ms: s.ms || null, planned: s.planned, tools: countList(s.tools)
+  })).sort((a, b) => (b.calls > 0) - (a.calls > 0) || b.calls - a.calls || a.name.localeCompare(b.name));
+  const mainAgent = rootTools.size ? {name: ROOT_AGENT, tools: countList(rootTools)} : null;
+
+  const mcpGroups = [];
+  Array.from(mcpInv.values()).forEach(t => {
+    const key = t.server || 'сервер не определён';
+    let g = mcpGroups.find(x => x.server === key);
+    if(!g){ g = {server: key, apps: [], tools: []}; mcpGroups.push(g); }
+    t.apps.forEach(a => { if(g.apps.indexOf(a) < 0) g.apps.push(a); });
+    g.tools.push({name: t.name, calls: t.calls, ms: t.ms || null, planned: t.planned,
+                  callers: countList(t.callers)});
+  });
+  mcpGroups.forEach(g => g.tools.sort((a, b) => b.calls - a.calls || a.name.localeCompare(b.name)));
+  mcpGroups.sort((a, b) => b.tools.filter(t => t.calls).length - a.tools.filter(t => t.calls).length);
+
   // ---- verdict + stats: once for the whole trace ("Все"), once per user request
   const segOf = ts => {
     let idx = 0;
@@ -1243,7 +1370,8 @@ function buildOne(traceId, recs){
     traceId: traceId, meta: meta, records: recs, events: clean,
     userQ: userQ, userQs: userQs, plan: plan, finalAnswer: finalAnswer, delivered: delivered,
     availableTools: allAvailable, calledMcp: calledMcp, calledSubs: calledSubs,
-    plannedSubs: plan ? (plan.steps || []).reduce((a, s) => a.concat(s.tools || []), []) : [],
+    plannedSubs: plannedNames,
+    subAgents: subAgents, mainAgent: mainAgent, mcpGroups: mcpGroups,
     findings: agg.findings, errors: errs, errorTotal: errTotal,
     stats: agg.stats, segments: segments
   };
@@ -1548,18 +1676,56 @@ function renderReport(){
     ? seg('all', answerHtml(tr.finalAnswer)) + segs.map(s => seg(s.index, answerHtml(s.finalAnswer))).join('')
     : answerHtml(tr.finalAnswer);
 
-  const toolInv = tr.availableTools.length ? (
-    '<div class="section"><div class="section-head"><h2>Инструменты</h2>' +
-    '<span class="hint">красным — вызванные, жёлтым — назначенные планировщиком, но не вызванные</span></div>' +
-    '<div class="tools">' + tr.availableTools.map(t => {
-      const used = tr.calledMcp.indexOf(t) >= 0;
-      const planned = !used && tr.plannedSubs.indexOf(t) >= 0;
-      return '<span class="tool ' + (used ? 'used' : planned ? 'planned' : '') + '">' + esc(t) + '</span>';
-    }).join('') + '</div>' +
-    (tr.plannedSubs.length ? '<div class="tools" style="margin-top:10px">' + tr.plannedSubs.map(t => {
-      const called = tr.calledSubs.indexOf(t) >= 0;
-      return '<span class="tool ' + (called ? 'used' : 'planned') + '">' + esc(t) + (called ? ' ✓' : ' — не вызван') + '</span>';
-    }).join('') + '</div>' : '') + '</div>'
+  // ---- sub-agents: who took part and which MCP tools each of them called
+  const toolChip = t => '<span class="tool used">' + esc(t.name) +
+    (t.count > 1 ? ' ×' + t.count : '') + '</span>';
+  const agentCard = (a, root) => {
+    const badge = root ? '<span class="badge root">оркестратор</span>' :
+      a.calls ? '<span class="badge ok">вызван' + (a.calls > 1 ? ' ×' + a.calls : '') + '</span>' :
+                '<span class="badge planned">назначен планом, не вызван</span>';
+    const tools = a.tools.length
+      ? '<span class="al">MCP-инструменты:</span>' + a.tools.map(toolChip).join('')
+      : '<span class="al none">MCP-инструменты не вызывал</span>';
+    return '<div class="agent ' + (root ? 'root' : a.calls ? 'used' : 'planned') + '">' +
+      '<div class="agent-top"><span class="agent-name">' + esc(a.name) + '</span>' + badge +
+      (a.ms ? '<span class="agent-ms">' + esc(fmtMs(a.ms)) + '</span>' : '') + '</div>' +
+      '<div class="agent-tools">' + tools + '</div></div>';
+  };
+  const agents = (tr.mainAgent ? [agentCard(tr.mainAgent, true)] : [])
+    .concat((tr.subAgents || []).map(a => agentCard(a, false)));
+  const subInv = agents.length ? (
+    '<div class="section"><div class="section-head"><h2>Саб-агенты</h2>' +
+    '<span class="hint">кто участвовал в обработке и какие MCP-инструменты вызвал</span></div>' +
+    '<div class="agents">' + agents.join('') + '</div></div>'
+  ) : '';
+
+  // ---- MCP tools: grouped by server; every called one names its caller
+  const mcpInv = (tr.mcpGroups || []).length ? (
+    '<div class="section"><div class="section-head"><h2>MCP-Tools</h2>' +
+    '<span class="hint">красным — вызванные, рядом видно, какой агент их вызвал; жёлтым — назначенные планировщиком</span></div>' +
+    tr.mcpGroups.map(g => {
+      const called = g.tools.filter(t => t.calls);
+      const idle = g.tools.filter(t => !t.calls);
+      return '<div class="mcp-group">' +
+        '<div class="mcp-srv"><span class="srv-name">' + esc(g.server) + '</span>' +
+        '<span class="srv-meta">инструментов: ' + g.tools.length + ' · вызвано: ' + called.length +
+        (g.apps.length ? ' · адаптер: ' + esc(g.apps.map(a => a.replace(/^alfagen-/, '')).join(', ')) : '') +
+        '</span></div>' +
+        (called.length ? '<div class="calls">' + called.map(t =>
+          '<div class="callrow"><span class="tool used">' + esc(t.name) + '</span>' +
+          '<span class="callmeta">' + (t.calls > 1 ? '×' + t.calls : '') +
+          (t.calls > 1 && t.ms ? ' · ' : '') + (t.ms ? esc(fmtMs(t.ms)) : '') + '</span>' +
+          '<span class="by">вызвал: ' + t.callers.map(c =>
+            '<span class="by-agent">' + esc(c.name) + '</span>' +
+            (c.count > 1 ? '<span class="by-n">×' + c.count + '</span>' : '')).join('') +
+          '</span></div>').join('') + '</div>' : '') +
+        (idle.length ? '<details class="pay idle"><summary>не вызывались: ' + idle.length + '</summary>' +
+          '<div class="tools">' + idle.map(t =>
+            '<span class="tool' + (t.planned ? ' planned' : '') + '">' + esc(t.name) +
+            (t.planned ? ' — назначен планом, не вызван' : '') + '</span>').join('') +
+          '</div></details>' : '') +
+      '</div>';
+    }).join('') + '</div>'
   ) : '';
 
   host.innerHTML =
@@ -1574,7 +1740,8 @@ function renderReport(){
     '<div class="section"><div class="section-head"><h2>Хроника</h2>' +
       '<span class="hint">' + (multiQ ? 'в трейсе несколько запросов — переключайте вкладки сверху' : 'отступ — глубина вызова, полоса справа — время') + '</span></div>' +
       '<div class="spine" id="spine">' + (rows || '<div class="empty">Значимых событий не найдено.</div>') + '</div></div>' +
-    toolInv +
+    subInv +
+    mcpInv +
     (tr.errors.length ? '<div class="section"><div class="section-head"><h2>Сбои и предупреждения</h2>' +
       '<span class="hint">' + tr.errorTotal + ' записей, свёрнуты по одинаковым сигнатурам</span></div>' +
       '<div class="verdict" style="margin-top:14px">' + tr.errors.map(g =>
@@ -1620,16 +1787,15 @@ function wireRaw(tr){
     const fa = $('#fapp').value, fl = $('#flvl').value;
     const rows = tr.records.filter(r =>
       (!fa || r.app === fa) && (!fl || r.level === fl) && (!q || r.msg.toLowerCase().indexOf(q) >= 0));
-    const cap = rows.slice(0, 2000);
+    // nothing is capped here: every matching record, with its message in full
     $('#rawtable').innerHTML =
       '<table class="raw"><thead><tr><th>время</th><th>сервис</th><th>ур.</th><th>сообщение</th></tr></thead><tbody>' +
-      cap.map(r => '<tr><td>' + esc(r.t ? r.t.toLocaleTimeString('ru-RU') + '.' + String(r.t.getMilliseconds()).padStart(3, '0') : '—') + '</td>' +
+      rows.map(r => '<tr><td>' + esc(r.t ? r.t.toLocaleTimeString('ru-RU') + '.' + String(r.t.getMilliseconds()).padStart(3, '0') : '—') + '</td>' +
         '<td>' + esc(r.app.replace(/^alfagen-/, '')) + '</td>' +
         '<td class="lvl lvl-' + esc(r.level) + '">' + esc(r.level) + '</td>' +
-        '<td class="msg">' + esc(r.msg.length > 1400 ? r.msg.slice(0, 1400) + ' …' : r.msg) + '</td></tr>').join('') +
+        '<td class="msg">' + esc(r.msg) + '</td></tr>').join('') +
       '</tbody></table>' +
-      (rows.length > cap.length ? '<div class="empty">Показано 2000 из ' + rows.length + ". Уточните фильтр.</div>" :
-       rows.length ? '' : '<div class="empty">Ничего не найдено.</div>');
+      (rows.length ? '' : '<div class="empty">Ничего не найдено.</div>');
   }
   ['#q','#fapp','#flvl'].forEach(s => { $(s).oninput = draw; $(s).onchange = draw; });
   draw();
