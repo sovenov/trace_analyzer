@@ -257,7 +257,7 @@ pre.json{
   font-family:var(--mono);font-size:11.5px;padding:3px 8px;border-radius:2px;
   border:1px solid var(--rule);background:var(--paper-2);color:var(--muted);
 }
-.tool.used{border-color:var(--crimson);color:var(--crimson);background:#fdeef3;font-weight:600}
+.tool.used{border-color:var(--forest);color:var(--forest);background:#e9f5ec;font-weight:600}
 .tool.planned{border-color:var(--amber);color:var(--amber);background:#fbf6e6}
 
 /* ---------- raw ---------- */
@@ -453,7 +453,7 @@ pre.json{
 .tool{
   border-color:var(--rule);border-radius:16px;background:var(--paper-2);padding:5px 10px;
 }
-.tool.used{border-color:#F2B8B5;background:#FCE8E6}
+.tool.used{border-color:#A8DAB5;background:#E6F4EA;color:var(--forest)}
 .tool.planned{border-color:#F9AB00;background:var(--paper-2)}
 
 /* ---------- sub-agents ---------- */
@@ -475,7 +475,10 @@ pre.json{
 .badge.ok{color:var(--navy);border-color:#AECBFA;background:#E8F0FE}
 .badge.planned{color:var(--amber);border-color:#F9AB00;background:#FBF6E6}
 .badge.root{color:var(--muted);border-color:var(--rule);background:var(--paper)}
+.agent-meta{font-size:12px;color:var(--muted);margin-top:6px}
 .agent-tools{display:flex;flex-wrap:wrap;align-items:center;gap:7px;margin-top:10px}
+.tool.sub{border-color:#AECBFA;background:#E8F0FE;color:var(--navy)}
+.tool.used.sub{border-color:#A8DAB5;background:#E6F4EA;color:var(--forest)}
 .al{
   font-size:10px;font-weight:600;letter-spacing:.09em;text-transform:uppercase;color:var(--muted);
 }
@@ -497,6 +500,8 @@ pre.json{
   padding:9px 16px;border-bottom:1px solid var(--rule-soft);
 }
 .calls .callrow:last-child{border-bottom:0}
+.calls.held{border-top:1px solid var(--rule-soft)}
+.calls.held .tool{opacity:.9}
 .callmeta{font-family:var(--mono);font-size:11.5px;color:var(--muted)}
 .by{
   margin-left:auto;display:flex;align-items:center;gap:6px;flex-wrap:wrap;
@@ -507,6 +512,8 @@ pre.json{
   border:1px solid #AECBFA;background:#E8F0FE;border-radius:16px;padding:3px 9px;
 }
 .by-n{font-family:var(--mono);font-size:11px;color:var(--muted);margin-left:-3px}
+.by-also{display:inline-flex;align-items:center;gap:6px;flex-wrap:wrap;margin-left:8px;color:var(--muted)}
+.by-also .by-agent{border-color:var(--rule);background:var(--paper);color:var(--muted)}
 details.pay.idle{margin:0;padding:11px 16px;border-top:1px solid var(--rule-soft)}
 details.pay.idle .tools{margin-top:10px}
 
@@ -833,6 +840,51 @@ function extractAvailableTools(msg){
   return {server: srv ? srv[1] : 'mcp', tools: names};
 }
 
+/* The tool set handed to one model turn. Logged twice in two shapes:
+     tools=[FunctionTool[type=function, function=Function[description=…, name=X, parameters={…}…
+     "tools":[{"type":"function","function":{"description":"…","name":"X","parameters":{…}…
+   Both put the name immediately before "parameters", and that pair is what we anchor on —
+   a bare name= would also hit names mentioned inside a description. */
+function extractOfferedTools(msg){
+  const i = msg.indexOf('tools=[FunctionTool');
+  const j = msg.indexOf('"tools":[{');
+  const at = (i >= 0 && (j < 0 || i < j)) ? i : j;
+  if(at < 0) return null;
+  const re = /"name"\s*:\s*"([\w.\-]+)"\s*,\s*"parameters"|name=([\w.\-]+),\s*parameters=/g;
+  re.lastIndex = at;
+  const names = [];
+  let m;
+  while((m = re.exec(msg))){
+    const n = m[1] || m[2];
+    if(names.indexOf(n) < 0) names.push(n);
+  }
+  if(!names.length) return null;
+  // Kibana cuts a record at ~6 KB, often mid-list. If the array never closes, what we
+  // read is a prefix of the real tool set — say so instead of pretending it is complete.
+  const java = (at === i);
+  const closed = java ? msg.indexOf('strict=false]]]', at) >= 0
+                      : msg.indexOf('"strict":false}}]', at) >= 0;
+  const id = /messageId=([0-9a-fA-F\-]{16,})/.exec(msg);
+  return {messageId: id ? id[1] : null, tools: names, partial: !closed};
+}
+
+/* langflow prints every tool it binds to a component:
+     StructuredTool(name='X', description=…, args_schema=<class '…InputSchema'>, metadata={'server_name': …}
+   The mcp.util schema marks a real MCP tool, langflow.io.schema marks a flow component —
+   that is, a sub-agent wearing a tool's clothes. */
+function extractToolKinds(msg){
+  if(msg.indexOf('StructuredTool(name=') < 0) return null;
+  const out = [];
+  msg.split('StructuredTool(').slice(1).forEach(chunk => {
+    const nm = /^name='([\w.\-]+)'/.exec(chunk);
+    const sch = /args_schema=<class '([^']+)'/.exec(chunk);
+    if(!nm || !sch) return;
+    const srv = /'server_name':\s*'([\w.\-]+)'/.exec(chunk);
+    out.push({name: nm[1], mcp: sch[1].indexOf('mcp') >= 0, server: srv ? srv[1] : null});
+  });
+  return out.length ? out : null;
+}
+
 function extractFinalAnswer(msg, app){
   if(app === 'alfagen-strategy-api' && msg.indexOf('Request to LangFlow succeeded') >= 0){
     const m = /LangFlowResponse\[sessionId=([^,]*), text=([\s\S]*)\]\s*$/.exec(msg);
@@ -1001,6 +1053,8 @@ function buildOne(traceId, recs){
                 durationMs: t1 - t0};
   const events = [];
   const availableTools = new Map();
+  const toolKind = new Map();   // tool name -> {mcp, server}: MCP tool or flow component
+  const offered = [];           // tool sets handed to individual model turns
   const spans = [];   // sub-agent [Request..Response] windows, for nesting
   let plan = null, finalAnswer = null, delivered = false, userQ = null;
   const userQs = [];
@@ -1047,6 +1101,16 @@ function buildOne(traceId, recs){
     // --- available MCP tools
     const av = extractAvailableTools(msg);
     if(av && !availableTools.has(av.server)) availableTools.set(av.server, av.tools);
+
+    // --- what each tool actually is, and which tools a given model turn was given
+    const kinds = extractToolKinds(msg);
+    if(kinds) kinds.forEach(k => {
+      const prev = toolKind.get(k.name);
+      if(!prev) toolKind.set(k.name, k);
+      else if(!prev.server && k.server) prev.server = k.server;
+    });
+    const off = extractOfferedTools(msg);
+    if(off) offered.push({ts: r.ts, messageId: off.messageId, tools: off.tools, partial: off.partial});
 
     // --- LLM turns
     if(app === 'alfagen-java-functions-service'){
@@ -1286,11 +1350,15 @@ function buildOne(traceId, recs){
   };
   // a planned name that is really an MCP tool belongs to the MCP list, not here
   plannedNames.forEach(n => { if(allAvailable.indexOf(n) < 0) subOf(n).planned = true; });
+  const rootTools = new Map();
   clean.forEach(e => {
     if(e.kind !== 'subagent') return;
     const s = subOf(e.name);
-    if(e.phase === 'in') s.calls++;
-    else if(e.ms != null) s.ms += e.ms;
+    if(e.phase !== 'in'){ if(e.ms != null) s.ms += e.ms; return; }
+    s.calls++;
+    // calling a sub-agent is itself a tool call, so it counts for whoever made it
+    const bag = e.under ? subOf(e.under).tools : rootTools;
+    bag.set(e.name, (bag.get(e.name) || 0) + 1);
   });
 
   const mcpInv = new Map();
@@ -1298,13 +1366,12 @@ function buildOne(traceId, recs){
     let t = mcpInv.get(name);
     if(!t){
       t = {name: name, server: serverOf.get(name) || null, calls: 0, ms: 0,
-           planned: plannedNames.indexOf(name) >= 0, apps: [], callers: new Map()};
+           planned: plannedNames.indexOf(name) >= 0, apps: [], callers: new Map(), offeredTo: []};
       mcpInv.set(name, t);
     }
     return t;
   };
   allAvailable.forEach(t => mcpOf(t));
-  const rootTools = new Map();
   clean.forEach(e => {
     if(!e.name || (e.kind !== 'mcp' && e.kind !== 'mcpwrap')) return;
     const t = mcpOf(e.name);
@@ -1321,12 +1388,75 @@ function buildOne(traceId, recs){
     bag.set(e.name, (bag.get(e.name) || 0) + 1);
   });
 
+  // ---- what each agent HAD on hand, not just what it used. A tool list belongs to the
+  // agent inside whose window its model turn started; the same list is logged twice
+  // (JSON and Java toString), so one messageId counts once.
+  const turnTools = new Map();
+  offered.forEach(o => {
+    const key = o.messageId || ('ts:' + o.ts);
+    let rec = turnTools.get(key);
+    if(!rec){ rec = {ts: o.ts, messageId: o.messageId, tools: [], partial: true}; turnTools.set(key, rec); }
+    // the two shapes truncate at different points, so take the union of both
+    o.tools.forEach(t => { if(rec.tools.indexOf(t) < 0) rec.tools.push(t); });
+    if(!o.partial) rec.partial = false;
+    if(o.ts < rec.ts) rec.ts = o.ts;
+  });
+
+  const offeredBy = new Map();
+  turnTools.forEach(o => {
+    const span = o.messageId && seenMsgIds.get(o.messageId);
+    const ts = span ? span.start : o.ts;
+    const host = spans.find(s => ts >= s.start && ts <= s.end);
+    const who = host ? host.name : ROOT_AGENT;
+    let rec = offeredBy.get(who);
+    if(!rec){ rec = {turns: 0, tools: [], partial: false}; offeredBy.set(who, rec); }
+    rec.turns++;
+    if(o.partial) rec.partial = true;
+    o.tools.forEach(t => { if(rec.tools.indexOf(t) < 0) rec.tools.push(t); });
+  });
+
+  // is this name an MCP tool or another agent? langflow's own binding log decides;
+  // otherwise fall back to what we saw the name behave as
+  const kindOf = name => {
+    const k = toolKind.get(name);
+    if(k) return k.mcp ? 'mcp' : 'sub';
+    if(mcpInv.has(name)) return 'mcp';
+    if(subInv.has(name) || plannedNames.indexOf(name) >= 0) return 'sub';
+    return null;
+  };
+  offeredBy.forEach((rec, who) => rec.tools.forEach(n => {
+    if(kindOf(n) !== 'mcp') return;
+    const t = mcpOf(n);   // a tool offered but missing from the cache still belongs in the list
+    if(!t.server){ const k = toolKind.get(n); if(k && k.server) t.server = k.server; }
+    if(t.offeredTo.indexOf(who) < 0) t.offeredTo.push(who);
+  }));
+
   const countList = m => Array.from(m.entries()).map(p => ({name: p[0], count: p[1]}))
     .sort((a, b) => b.count - a.count || a.name.localeCompare(b.name));
-  const subAgents = Array.from(subInv.values()).map(s => ({
-    name: s.name, calls: s.calls, ms: s.ms || null, planned: s.planned, tools: countList(s.tools)
-  })).sort((a, b) => (b.calls > 0) - (a.calls > 0) || b.calls - a.calls || a.name.localeCompare(b.name));
-  const mainAgent = rootTools.size ? {name: ROOT_AGENT, tools: countList(rootTools)} : null;
+  // one chip per tool the agent had or used: kind for the styling, count for "×N"
+  const toolsetOf = (who, called) => {
+    const rec = offeredBy.get(who);
+    const names = (rec ? rec.tools.slice() : []);
+    Array.from(called.keys()).forEach(n => { if(names.indexOf(n) < 0) names.push(n); });
+    const rank = {mcp: 0, sub: 2};
+    return names.map(n => ({name: n, kind: kindOf(n), count: called.get(n) || 0}))
+      .sort((a, b) => b.count - a.count ||
+        (rank[a.kind] == null ? 1 : rank[a.kind]) - (rank[b.kind] == null ? 1 : rank[b.kind]) ||
+        a.name.localeCompare(b.name));
+  };
+  const agentInfo = (name, called, extra) => {
+    const off = offeredBy.get(name);
+    return Object.assign({
+      name: name, tools: countList(called), toolset: toolsetOf(name, called),
+      known: !!off, turns: off ? off.turns : 0, partial: !!(off && off.partial)
+    }, extra);
+  };
+
+  const subAgents = Array.from(subInv.values()).map(s =>
+    agentInfo(s.name, s.tools, {calls: s.calls, ms: s.ms || null, planned: s.planned})
+  ).sort((a, b) => (b.calls > 0) - (a.calls > 0) || b.calls - a.calls || a.name.localeCompare(b.name));
+  const mainAgent = (rootTools.size || offeredBy.has(ROOT_AGENT))
+    ? agentInfo(ROOT_AGENT, rootTools, {}) : null;
 
   const mcpGroups = [];
   Array.from(mcpInv.values()).forEach(t => {
@@ -1335,7 +1465,7 @@ function buildOne(traceId, recs){
     if(!g){ g = {server: key, apps: [], tools: []}; mcpGroups.push(g); }
     t.apps.forEach(a => { if(g.apps.indexOf(a) < 0) g.apps.push(a); });
     g.tools.push({name: t.name, calls: t.calls, ms: t.ms || null, planned: t.planned,
-                  callers: countList(t.callers)});
+                  callers: countList(t.callers), offeredTo: t.offeredTo || []});
   });
   mcpGroups.forEach(g => g.tools.sort((a, b) => b.calls - a.calls || a.name.localeCompare(b.name)));
   mcpGroups.sort((a, b) => b.tools.filter(t => t.calls).length - a.tools.filter(t => t.calls).length);
@@ -1676,50 +1806,68 @@ function renderReport(){
     ? seg('all', answerHtml(tr.finalAnswer)) + segs.map(s => seg(s.index, answerHtml(s.finalAnswer))).join('')
     : answerHtml(tr.finalAnswer);
 
-  // ---- sub-agents: who took part and which MCP tools each of them called
-  const toolChip = t => '<span class="tool used">' + esc(t.name) +
-    (t.count > 1 ? ' ×' + t.count : '') + '</span>';
+  // ---- sub-agents: what each one had on hand and what it actually used
   const agentCard = (a, root) => {
     const badge = root ? '<span class="badge root">оркестратор</span>' :
       a.calls ? '<span class="badge ok">вызван' + (a.calls > 1 ? ' ×' + a.calls : '') + '</span>' :
                 '<span class="badge planned">назначен планом, не вызван</span>';
-    const tools = a.tools.length
-      ? '<span class="al">MCP-инструменты:</span>' + a.tools.map(toolChip).join('')
-      : '<span class="al none">MCP-инструменты не вызывал</span>';
+    const set = a.toolset || [];
+    const used = set.filter(t => t.count).length;
+    const mcp = set.filter(t => t.kind === 'mcp').length;
+    const meta = a.known
+      ? 'выдано инструментов: ' + set.length + (a.partial ? '+' : '') +
+        ' · из них MCP: ' + mcp + (a.partial ? '+' : '') + ' · вызвал: ' + used +
+        (a.partial ? ' · запись в логах обрезана, набор может быть неполным' : '')
+      : (set.length ? 'вызвал: ' + used + ' · выданный набор в логах не виден'
+                    : 'ничего не вызывал · выданный набор в логах не виден');
+    const chips = set.map(t =>
+      '<span class="tool' + (t.count ? ' used' : '') + (t.kind === 'sub' ? ' sub' : '') + '">' +
+      esc(t.name) + (t.count > 1 ? ' ×' + t.count : '') + '</span>').join('');
     return '<div class="agent ' + (root ? 'root' : a.calls ? 'used' : 'planned') + '">' +
       '<div class="agent-top"><span class="agent-name">' + esc(a.name) + '</span>' + badge +
       (a.ms ? '<span class="agent-ms">' + esc(fmtMs(a.ms)) + '</span>' : '') + '</div>' +
-      '<div class="agent-tools">' + tools + '</div></div>';
+      '<div class="agent-meta">' + esc(meta) + '</div>' +
+      (chips ? '<div class="agent-tools">' + chips + '</div>' : '') + '</div>';
   };
   const agents = (tr.mainAgent ? [agentCard(tr.mainAgent, true)] : [])
     .concat((tr.subAgents || []).map(a => agentCard(a, false)));
   const subInv = agents.length ? (
     '<div class="section"><div class="section-head"><h2>Саб-агенты</h2>' +
-    '<span class="hint">кто участвовал в обработке и какие MCP-инструменты вызвал</span></div>' +
+    '<span class="hint">что было выдано агенту и что он вызвал: зелёным — вызванные, синим — вложенные агенты</span></div>' +
     '<div class="agents">' + agents.join('') + '</div></div>'
   ) : '';
 
-  // ---- MCP tools: grouped by server; every called one names its caller
+  // ---- MCP tools: grouped by server; who was given each tool and who called it
+  const agentRef = (name, n) => '<span class="by-agent">' + esc(name) + '</span>' +
+    (n > 1 ? '<span class="by-n">×' + n + '</span>' : '');
   const mcpInv = (tr.mcpGroups || []).length ? (
     '<div class="section"><div class="section-head"><h2>MCP-Tools</h2>' +
-    '<span class="hint">красным — вызванные, рядом видно, какой агент их вызвал; жёлтым — назначенные планировщиком</span></div>' +
+    '<span class="hint">зелёным — вызванные, с указанием вызвавшего агента; ниже — кому инструмент был выдан, но не понадобился</span></div>' +
     tr.mcpGroups.map(g => {
       const called = g.tools.filter(t => t.calls);
-      const idle = g.tools.filter(t => !t.calls);
+      const held = g.tools.filter(t => !t.calls && t.offeredTo.length);
+      const idle = g.tools.filter(t => !t.calls && !t.offeredTo.length);
       return '<div class="mcp-group">' +
         '<div class="mcp-srv"><span class="srv-name">' + esc(g.server) + '</span>' +
         '<span class="srv-meta">инструментов: ' + g.tools.length + ' · вызвано: ' + called.length +
+        (held.length ? ' · выдано агентам без вызова: ' + held.length : '') +
         (g.apps.length ? ' · адаптер: ' + esc(g.apps.map(a => a.replace(/^alfagen-/, '')).join(', ')) : '') +
         '</span></div>' +
-        (called.length ? '<div class="calls">' + called.map(t =>
-          '<div class="callrow"><span class="tool used">' + esc(t.name) + '</span>' +
-          '<span class="callmeta">' + (t.calls > 1 ? '×' + t.calls : '') +
-          (t.calls > 1 && t.ms ? ' · ' : '') + (t.ms ? esc(fmtMs(t.ms)) : '') + '</span>' +
-          '<span class="by">вызвал: ' + t.callers.map(c =>
-            '<span class="by-agent">' + esc(c.name) + '</span>' +
-            (c.count > 1 ? '<span class="by-n">×' + c.count + '</span>' : '')).join('') +
-          '</span></div>').join('') + '</div>' : '') +
-        (idle.length ? '<details class="pay idle"><summary>не вызывались: ' + idle.length + '</summary>' +
+        (called.length ? '<div class="calls">' + called.map(t => {
+          const idle2 = t.offeredTo.filter(w => !t.callers.some(c => c.name === w));
+          return '<div class="callrow"><span class="tool used">' + esc(t.name) + '</span>' +
+            '<span class="callmeta">' + (t.calls > 1 ? '×' + t.calls : '') +
+            (t.calls > 1 && t.ms ? ' · ' : '') + (t.ms ? esc(fmtMs(t.ms)) : '') + '</span>' +
+            '<span class="by">вызвал: ' + t.callers.map(c => agentRef(c.name, c.count)).join('') +
+            (idle2.length ? '<span class="by-also">также выдан: ' + idle2.map(w => agentRef(w, 1)).join('') + '</span>' : '') +
+            '</span></div>';
+        }).join('') + '</div>' : '') +
+        (held.length ? '<div class="calls held">' + held.map(t =>
+          '<div class="callrow"><span class="tool' + (t.planned ? ' planned' : '') + '">' + esc(t.name) + '</span>' +
+          '<span class="callmeta">не вызывался</span>' +
+          '<span class="by">выдан: ' + t.offeredTo.map(w => agentRef(w, 1)).join('') + '</span></div>').join('') +
+          '</div>' : '') +
+        (idle.length ? '<details class="pay idle"><summary>ни одному агенту не выдавались: ' + idle.length + '</summary>' +
           '<div class="tools">' + idle.map(t =>
             '<span class="tool' + (t.planned ? ' planned' : '') + '">' + esc(t.name) +
             (t.planned ? ' — назначен планом, не вызван' : '') + '</span>').join('') +
