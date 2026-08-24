@@ -712,6 +712,18 @@ function extractUser(msg, app){
       return {text: unesc(iv[1]), session: sid && sid[1]};
     }
   }
+  // Some dumps have no access log at all — then the only full copy of the question is
+  // langflow's run summary, "Run outputs: inputs={'input_value': '…'}". That record is
+  // written when the flow finishes, so the event is anchored to the start of the trace.
+  if(app === 'alfagen-langflow' && msg.lastIndexOf('Run outputs:', 0) === 0){
+    const i = msg.indexOf("'input_value'");
+    if(i >= 0){
+      let j = i + "'input_value'".length;
+      while(j < msg.length && msg[j] !== "'" && msg[j] !== '"') j++;
+      const str = pyString(msg, j);
+      if(str && str.text.trim()) return {text: str.text, atStart: true};
+    }
+  }
   if(app === 'alfagen-compliance-api'){
     const m = /body:([\s\S]+)$/.exec(msg);
     if(m) return {text: m[1].trim()};
@@ -890,6 +902,11 @@ function extractSubAgent(msg){
   const ho = safeJson(h);
   if(ho){
     out.runId = ho.run_id; out.parentRunId = ho.parent_run_id; out.status = ho.status;
+    // metadata tells the two apart: server_name = a real MCP tool, display_name = a flow
+    // component, i.e. a sub-agent wearing a tool's clothes
+    const md = ho.metadata || {};
+    if(md.server_name){ out.mcp = true; out.server = md.server_name; }
+    else if(md.display_name) out.mcp = false;
     if(ho.start_time && ho.finish_time){
       const a = new Date(ho.start_time), b = new Date(ho.finish_time);
       if(!isNaN(a) && !isNaN(b)) out.ms = b - a;
@@ -988,7 +1005,16 @@ function extractFinalAnswer(msg, app){
     if(at < 0) return null;
     const id = /messageId='([^']*)'/.exec(msg);
     const s = /"sessionId"\s*:\s*"([^"]*)"/.exec(msg);
-    return {session: s && s[1], messageId: id && id[1], text: balanced(msg, at).text};
+    // the same envelope carries the client profile — the only place it appears when the
+    // langflow access log is missing from the dump
+    const ctx = {};
+    const md = safeJson(firstJsonAfter(msg, '{"type":"metadata","body":')) || {};
+    ['cus','channelApp','deviceModel','segment','operationSystem','mobileUserRole','am_version']
+      .forEach(k => { if(md[k]) ctx[k] = md[k]; });
+    const cus = /"cus"\s*:\s*"([^"]+)"/.exec(msg);
+    if(!ctx.cus && cus) ctx.cus = cus[1];
+    return {session: s && s[1], messageId: id && id[1], text: balanced(msg, at).text,
+            ctx: Object.keys(ctx).length ? ctx : null};
   }
   return null;
 }
@@ -1184,6 +1210,7 @@ function buildOne(traceId, recs){
   const spans = [];   // sub-agent [Request..Response] windows, for nesting
   let plan = null, finalAnswer = null, delivered = false, userQ = null, answerMsgId = null;
   const userQs = [];
+  const userEvOf = new Map();   // question text -> its timeline event, for re-dating
   const seenMsgIds = new Map();
 
   // pass 1: request/response timing per LLM messageId (start = first sighting, end = "Answer is ready")
@@ -1225,14 +1252,27 @@ function buildOne(traceId, recs){
       const text = u.text.trim();
       const same = userQs.find(q => q.text.trim() === text);
       if(same){
-        Object.keys(u).forEach(k => { if(!same[k] && u[k]) same[k] = u[k]; });
+        Object.keys(u).forEach(k => { if(!same[k] && u[k] && k !== 'ts') same[k] = u[k]; });
+        // several services echo the question, some of them only after the answer is out;
+        // the earliest sighting is the one closest to when it was actually asked
+        if(!u.atStart && r.ts < same.ts){
+          same.ts = r.ts;
+          const ev = userEvOf.get(text);
+          if(ev) ev.ts = r.ts;
+        }
       } else {
-        u.ts = r.ts;
+        // a question recovered from the run summary is dated by the record that closes
+        // the run, so put it where it actually happened — at the head of the trace
+        const ts = (u.atStart && !userQs.length) ? t0 : r.ts;
+        u.ts = ts;
         userQs.push(u);
         if(!userQ) userQ = u;
-        events.push({ts: r.ts, kind: 'user', depth: 0, chip: 'Запрос', chipClass: 'c-user',
-                     title: 'Сообщение пользователя', quote: text, app: app,
-                     qIndex: userQs.length - 1});
+        const ev = {ts: ts, kind: 'user', depth: 0, chip: 'Запрос', chipClass: 'c-user',
+                    title: 'Сообщение пользователя', quote: text, app: app,
+                    meta: u.atStart ? 'восстановлено из итогов запуска — точное время неизвестно' : '',
+                    qIndex: userQs.length - 1};
+        userEvOf.set(text, ev);
+        events.push(ev);
       }
     }
     const ctx = (app === 'alfagen-strategy-api' && msg.indexOf('Incoming request') >= 0) ? extractContext(msg) : null;
@@ -1305,6 +1345,7 @@ function buildOne(traceId, recs){
     // --- sub-agent boundaries
     const sa = extractSubAgent(msg);
     if(sa){
+      if(sa.mcp != null && !toolKind.has(sa.name)) toolKind.set(sa.name, {name: sa.name, mcp: sa.mcp, server: sa.server || null});
       if(sa.phase === 'Request'){
         spans.push({name: sa.name, start: r.ts, end: Infinity, runId: sa.runId});
         events.push({ts: r.ts, kind: 'subagent', phase: 'in', depth: 1, chip: 'Саб-агент', chipClass: 'c-sub',
@@ -1363,6 +1404,7 @@ function buildOne(traceId, recs){
 
     // --- final answer + delivery
     const fa = extractFinalAnswer(msg, app);
+    if(fa && fa.ctx) meta.ctx = Object.assign(meta.ctx || {}, fa.ctx);
     if(fa && fa.text && fa.text.trim()){
       finalAnswer = humanizeAnswer(fa.text.trim()).trim();
       if(fa.messageId) answerMsgId = fa.messageId;
@@ -1413,12 +1455,19 @@ function buildOne(traceId, recs){
 
   const allAvailable = Array.from(new Set([].concat.apply([], Array.from(availableTools.values()))));
 
-  // langflow exposes MCP tools as ordinary tools; re-label those so they don't pose as sub-agents
+  // langflow exposes MCP tools as ordinary tools; re-label those so they don't pose as
+  // sub-agents. The tool cache is not always in the dump, so a name also counts as MCP
+  // when langflow named its server or the adapter logged a call under the same name.
+  const adapterTools = new Set(clean.filter(e => e.kind === 'mcp' && e.name).map(e => e.name));
+  const isMcpName = n => allAvailable.indexOf(n) >= 0 || adapterTools.has(n) ||
+                         !!(toolKind.get(n) && toolKind.get(n).mcp);
   clean.forEach(e => {
-    if(e.kind === 'subagent' && allAvailable.indexOf(e.name) >= 0){
+    if(e.kind === 'subagent' && isMcpName(e.name)){
       e.kind = 'mcpwrap'; e.chip = 'MCP'; e.chipClass = 'c-mcp'; e.depth = 2;
     }
   });
+  // an MCP tool is not a host: its window must not adopt the calls that ran during it
+  for(let i = spans.length - 1; i >= 0; i--) if(isMcpName(spans[i].name)) spans.splice(i, 1);
 
   // pull errors out of the narrative and group them by signature
   const errorGroups = new Map();
@@ -1502,6 +1551,8 @@ function buildOne(traceId, recs){
   const plannedNames = plan ? (plan.steps || []).reduce((a, s) => a.concat(s.tools || []), []) : [];
   const serverOf = new Map();
   availableTools.forEach((tools, srv) => tools.forEach(t => { if(!serverOf.has(t)) serverOf.set(t, srv); }));
+  // without the tool cache the server is only named on the call itself
+  toolKind.forEach((k, n) => { if(k.mcp && k.server && !serverOf.has(n)) serverOf.set(n, k.server); });
 
   const subInv = new Map();
   const subOf = name => {
@@ -1621,7 +1672,9 @@ function buildOne(traceId, recs){
 
   const mcpGroups = [];
   Array.from(mcpInv.values()).forEach(t => {
-    const key = t.server || 'сервер не определён';
+    // no tool cache in the dump means no server name — fall back to the adapter that
+    // actually served the calls, which is the same thing under a different label
+    const key = t.server || (t.apps.length === 1 ? t.apps[0] : 'сервер не определён');
     let g = mcpGroups.find(x => x.server === key);
     if(!g){ g = {server: key, apps: [], tools: []}; mcpGroups.push(g); }
     t.apps.forEach(a => { if(g.apps.indexOf(a) < 0) g.apps.push(a); });
