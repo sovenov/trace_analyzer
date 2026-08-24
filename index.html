@@ -676,14 +676,30 @@ const REFUSAL = [/нет данных/i, /не могу/i, /к сожалени�
 
 /* ---- per-record extractors ------------------------------------------- */
 
+/* The langflow run endpoint is versioned and sometimes namespaced by installation:
+   /api/v1/run/<flow>, /api/v1/alfi/run/<flow>, … — match the shape, not one literal. */
+const LANGFLOW_RUN = /\/api\/v\d+\/(?:[\w.-]+\/)?run\//;
+
 function extractUser(msg, app){
   // langflow access log carries a clean JSON body
-  if(app === 'alfagen-langflow' && msg.indexOf('/api/v1/run/') >= 0){
+  if(app === 'alfagen-langflow' && LANGFLOW_RUN.test(msg)){
     const raw = firstJsonAfter(msg, 'body=');
     const o = safeJson(raw);
     if(o && o.input_value){
-      return {text: o.input_value, session: o.session_id, cus: o.customer_id,
-              channel: o.source_channel_id, os: o.operation_system, segment: o.segment};
+      // async (queue-keeper) stack nests the client profile under tweaks and the
+      // channel under comod; the direct stack puts both at the top level
+      const md = ((o.tweaks || {})['Chat Input Metadata'] || {}).metadata || {};
+      const cm = o.comod || {};
+      const u = {text: o.input_value, session: o.session_id,
+                 cus: o.customer_id || cm.cus || md.cus,
+                 channel: o.source_channel_id || cm.source_channel_id || md.channelApp,
+                 os: o.operation_system || md.operationSystem,
+                 segment: o.segment || md.segment};
+      const ctx = {};
+      ['cus','channelApp','deviceModel','segment','operationSystem','mobileUserRole','am_version']
+        .forEach(k => { if(md[k]) ctx[k] = md[k]; });
+      if(Object.keys(ctx).length) u.ctx = ctx;
+      return u;
     }
     // response-shaped access log: question sits in outputs[].inputs.input_value
     if(o && Array.isArray(o.outputs) && o.outputs[0] && o.outputs[0].inputs && o.outputs[0].inputs.input_value){
@@ -747,6 +763,75 @@ function extractLlmTurn(msg){
     if(t) out.usage[k] = +t[1];
   });
   return out;
+}
+
+/* Read one Python-repr string literal starting at the quote under `at`. */
+function pyString(s, at){
+  const q = s[at];
+  if(q !== "'" && q !== '"') return null;
+  let out = '', i = at + 1;
+  const ESC = {n: '\n', t: '\t', r: '\r', '0': '\0'};
+  while(i < s.length){
+    const c = s[i];
+    if(c === '\\'){
+      const n = s[i + 1];
+      if(n === 'x' || n === 'u' || n === 'U'){
+        const len = n === 'x' ? 2 : (n === 'u' ? 4 : 8);
+        const hex = s.substr(i + 2, len);
+        if(/^[0-9a-fA-F]+$/.test(hex)){ out += String.fromCodePoint(parseInt(hex, 16)); i += 2 + len; continue; }
+      }
+      out += (ESC[n] != null ? ESC[n] : n);
+      i += 2; continue;
+    }
+    if(c === q) return {text: out, end: i};
+    out += c; i++;
+  }
+  return {text: out, end: s.length};   // record cut by Kibana — keep what we read
+}
+
+/* langflow's "Спросить LLM" component logs every model turn on both sides:
+     [ASK LLM] Request  | model=… | headers: {…} | body: {…}
+     [ASK LLM] Response | model=… | total_tokens=N | headers: {…} | body: {…}
+   The body is a Python repr, not JSON, so the generation text is read as a Python
+   string. This is the only LLM trace the async (queue-keeper) stack leaves — there
+   is no java-functions-service "Answer is ready" record there. */
+function extractAskLlm(msg){
+  const m = /^\[ASK LLM\]\s*(Request|Response)\s*\|/.exec(msg);
+  if(!m) return null;
+  const out = {phase: m[1], toolCalls: [], content: '', finish: null, usage: {}};
+
+  const model = /\|\s*model=([^|]+?)\s*(?:\||$)/.exec(msg);
+  if(model) out.model = model[1];
+  const id = /'messageId':\s*'([^']+)'/.exec(msg);
+  if(id) out.messageId = id[1];
+  if(out.phase === 'Request') return out;
+
+  ['prompt_tokens','completion_tokens','total_tokens'].forEach(k => {
+    const t = new RegExp("'" + k + "':\\s*(\\d+)").exec(msg);
+    if(t) out.usage[k] = +t[1];
+  });
+  const gi = msg.indexOf("'generations'");
+  if(gi >= 0){
+    const ci = msg.indexOf("'content'", gi);
+    if(ci >= 0){
+      let j = ci + "'content'".length;
+      while(j < msg.length && msg[j] !== "'" && msg[j] !== '"') j++;
+      const str = pyString(msg, j);
+      if(str) out.content = str.text;
+    }
+  }
+  return out;
+}
+
+/* Identity of a model turn, for matching the same turn logged by two services. The two
+   records are masked independently ("26248" vs "*MASKED_CURRENCY*"), so digits and
+   masks collapse to the same placeholder before comparing, and the two services also
+   escape newlines differently, so backslash escapes are flattened too. */
+function turnKey(s){
+  return String(s == null ? '' : s)
+    .replace(/\\+[nrt]/g, ' ').replace(/\\+/g, '')
+    .replace(/\*MASKED_[A-Z_]+\*/g, '#').replace(/\d+/g, '#').replace(/#+/g, '#')
+    .replace(/\s+/g, ' ').trim().slice(0, 300);
 }
 
 /* Classify an LLM turn by the shape of what it produced. */
@@ -896,15 +981,42 @@ function extractFinalAnswer(msg, app){
     const m = /LangFlowResponse\[sessionId=([^,]*), text=([\s\S]*)\]\s*$/.exec(msg);
     if(m) return {session: m[1], text: m[2]};
   }
+  // async stack: comod-adapter posts the answer to the channel. The same call carries
+  // intermediate "thinking" bubbles too — only status REPLY is the real answer.
+  if(msg.indexOf('COMOD answer send request') >= 0 && /"status"\s*:\s*"REPLY"/.test(msg)){
+    const at = msg.indexOf('{"type":"assembly"');
+    if(at < 0) return null;
+    const id = /messageId='([^']*)'/.exec(msg);
+    const s = /"sessionId"\s*:\s*"([^"]*)"/.exec(msg);
+    return {session: s && s[1], messageId: id && id[1], text: balanced(msg, at).text};
+  }
   return null;
 }
 
 /* Answers now arrive as a structured "assembly" (message bubbles + chip buttons)
    instead of plain text. Flatten it to what the user actually saw. */
+/* Kibana cuts a record at ~6 KB, and an assembly is routinely longer than that, so
+   JSON.parse gets nothing. Harvest the bubbles the user saw straight from the text. */
+function scrapeAssembly(txt){
+  const bubbles = [], chips = [];
+  const re = /"type"\s*:\s*"(message|dialogSuggestion|chips)"\s*,\s*"body"\s*:\s*\{\s*"text"\s*:\s*"((?:[^"\\]|\\.)*)"/g;
+  let m;
+  while((m = re.exec(txt))){
+    (m[1] === 'message' ? bubbles : chips).push(unesc(m[2]));
+  }
+  if(!bubbles.length && !chips.length) return null;
+  let out = bubbles.join('\n\n');
+  if(chips.length) out += (out ? '\n\n' : '') + 'Кнопки: ' + chips.join(' · ');
+  return out;
+}
+
 function humanizeAnswer(txt, depth){
   depth = depth || 0;
   const o = safeJson(txt);
-  if(!(o && o.type === 'assembly' && Array.isArray(o.children))) return txt;
+  if(!(o && o.type === 'assembly' && Array.isArray(o.children))){
+    if(/"type"\s*:\s*"assembly"/.test(txt)) return scrapeAssembly(txt) || txt;
+    return txt;
+  }
   const bubbles = [], chips = [];
   (function walk(nodes){
     nodes.forEach(n => {
@@ -929,6 +1041,14 @@ function extractDelivery(msg){
     const s = /sessionId='([^']*)'/.exec(msg);
     const u = /userId='([^']*)'/.exec(msg);
     return {kind: 'sent', session: s && s[1], userId: u && u[1]};
+  }
+  // async stack. Fires for every intermediate bubble as well, so the messageId is
+  // reported and the caller keeps only the one matching the final answer.
+  if(msg.indexOf('COMOD answer sent') >= 0){
+    const id = /messageId='([^']*)'/.exec(msg);
+    const u = /userId='([^']*)'/.exec(msg);
+    const ch = /clientChannel='([^']*)'/.exec(msg);
+    return {kind: 'sent', messageId: id && id[1], userId: u && u[1], channel: ch && ch[1]};
   }
   if(msg.indexOf("changed status to 'ANSWERED'") >= 0) return {kind: 'answered'};
   return null;
@@ -1062,7 +1182,7 @@ function buildOne(traceId, recs){
   const toolKind = new Map();   // tool name -> {mcp, server}: MCP tool or flow component
   const offered = [];           // tool sets handed to individual model turns
   const spans = [];   // sub-agent [Request..Response] windows, for nesting
-  let plan = null, finalAnswer = null, delivered = false, userQ = null;
+  let plan = null, finalAnswer = null, delivered = false, userQ = null, answerMsgId = null;
   const userQs = [];
   const seenMsgIds = new Map();
 
@@ -1081,12 +1201,26 @@ function buildOne(traceId, recs){
     });
   });
 
+  // langflow logs a model turn as a Request/Response pair with no shared id, and the
+  // calls are sequential, so the pending Request is simply the previous one.
+  const askPending = [];
+  const askLlmPhase = msg => msg.lastIndexOf('[ASK LLM]', 0) === 0;
+  const askLlmTurn = (msg, r) => {
+    const a = extractAskLlm(msg);
+    if(!a) return null;
+    if(a.phase === 'Request'){ askPending.push(r.ts); return null; }
+    const start = askPending.length ? askPending.shift() : null;
+    if(start != null) a.span = {start: start, end: r.ts};
+    return a;
+  };
+
   recs.forEach(r => {
     const msg = r.msg, app = r.app;
 
     // --- user question. The same question is reported by several services (merge
     // those), but a genuinely new question text starts a new segment of the trace.
     const u = extractUser(msg, app);
+    if(u && u.ctx) meta.ctx = Object.assign(meta.ctx || {}, u.ctx);
     if(u && u.text && u.text.trim()){
       const text = u.text.trim();
       const same = userQs.find(q => q.text.trim() === text);
@@ -1119,15 +1253,17 @@ function buildOne(traceId, recs){
     if(off) offered.push({ts: r.ts, messageId: off.messageId, tools: off.tools, partial: off.partial});
 
     // --- LLM turns
-    if(app === 'alfagen-java-functions-service'){
-      const turn = extractLlmTurn(msg);
+    if(app === 'alfagen-java-functions-service' || askLlmPhase(msg)){
+      const fromAsk = app !== 'alfagen-java-functions-service';
+      const turn = fromAsk ? askLlmTurn(msg, r) : extractLlmTurn(msg);
       if(turn){
         const cls = classifyTurn(turn);
-        const span = seenMsgIds.get(turn.messageId);
+        const span = fromAsk ? turn.span : seenMsgIds.get(turn.messageId);
         const ev = {ts: r.ts, kind: 'llm', depth: 0, chip: 'Модель', chipClass: 'c-llm',
                     title: cls.role, tag: cls.tag, app: app, model: turn.model,
                     usage: turn.usage, finish: turn.finish, messageId: turn.messageId,
-                    startTs: span ? span.start : r.ts, ms: span ? (span.end - span.start) : null};
+                    startTs: span ? span.start : r.ts, ms: span ? (span.end - span.start) : null,
+                    fromAsk: fromAsk, contentKey: turnKey(turn.content), empty: !String(turn.content || '').trim()};
 
         if(cls.tag === 'plan'){
           plan = cls.data;
@@ -1155,6 +1291,12 @@ function buildOne(traceId, recs){
         } else {
           ev.quote = turn.content;
           ev.payload = turn.content.length > 400 ? turn.content : null;
+        }
+        // langflow does not log the tool calls themselves — a turn with no text is the
+        // model handing back tool calls, and the [TOOL] records right after are them
+        if(fromAsk && ev.empty){
+          ev.title = 'Решение вызвать инструмент'; ev.tag = 'call'; ev.depth = 1;
+          ev.meta = 'ответ без текста — далее идут вызовы инструментов';
         }
         events.push(ev);
       }
@@ -1223,12 +1365,16 @@ function buildOne(traceId, recs){
     const fa = extractFinalAnswer(msg, app);
     if(fa && fa.text && fa.text.trim()){
       finalAnswer = humanizeAnswer(fa.text.trim()).trim();
+      if(fa.messageId) answerMsgId = fa.messageId;
       events.push({ts: r.ts, kind: 'answer', depth: 0, chip: 'Ответ', chipClass: 'c-ans',
                    title: 'Ответ отдан в сессию', quote: finalAnswer, app: app, full: true});
     }
     const dl = extractDelivery(msg);
     if(dl){
-      if(dl.kind === 'sent'){
+      // the async stack reports a send for every intermediate bubble too — only the
+      // one carrying the final answer's messageId is the delivery we care about
+      if(dl.kind === 'sent' && dl.messageId && dl.messageId !== answerMsgId){ /* intermediate */ }
+      else if(dl.kind === 'sent'){
         delivered = true;
         meta.userId = dl.userId || meta.userId;
         events.push({ts: r.ts, kind: 'answer', depth: 0, chip: 'Доставка', chipClass: 'c-ans',
@@ -1238,17 +1384,26 @@ function buildOne(traceId, recs){
     }
 
     // --- errors
-    if(r.level === 'ERROR' || r.level === 'WARN' ||
+    // python services say WARNING where java says WARN, and langflow lowercases its levels
+    const lvl = String(r.level || '').toUpperCase();
+    if(lvl === 'ERROR' || lvl === 'FATAL' || lvl.lastIndexOf('WARN', 0) === 0 ||
        (r.raw.exception && r.raw.exception !== '(empty)' && r.raw.exception !== '-')){
-      events.push({ts: r.ts, kind: 'error', depth: 0, chip: r.level || 'СБОЙ', chipClass: 'c-err',
+      events.push({ts: r.ts, kind: 'error', depth: 0, chip: lvl || 'СБОЙ', chipClass: 'c-err',
                    title: r.logger || app, app: app, quote: msg.slice(0, 600),
                    payload: (r.raw.exception && r.raw.exception !== '(empty)') ? r.raw.exception : null});
     }
   });
 
   // dedupe repeated langflow/MCP emissions
+  // A stack that runs java-functions-service logs every model turn twice — once there
+  // ("Answer is ready", with tool calls and timing) and once in langflow ("[ASK LLM]").
+  // Keep the richer java-functions copy; the langflow one only carries this trace when
+  // java-functions is not in the picture at all.
+  const nativeTurns = events.filter(e => e.kind === 'llm' && !e.fromAsk);
   const seenKeys = new Set();
   let clean = events.filter(e => {
+    if(e.kind === 'llm' && e.fromAsk &&
+       nativeTurns.some(n => n.contentKey === e.contentKey && Math.abs(n.ts - e.ts) < 60000)) return false;
     if(!e.dedupeKey) return true;
     if(seenKeys.has(e.dedupeKey)) return false;
     seenKeys.add(e.dedupeKey);
