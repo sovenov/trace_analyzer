@@ -846,6 +846,50 @@ function turnKey(s){
     .replace(/\s+/g, ' ').trim().slice(0, 300);
 }
 
+/* llm-integration-service mirrors the raw provider answer:
+     [messageId=…] [additionalTags=[…]] Rest response from LLM: {"model":…,"choices":[…]}
+   It is JSON, but masking rewrites numbers inside strings ("00:00:*MASKED_CURRENCY*"),
+   which breaks JSON.parse on perfectly good records — so read the fields directly.
+   This is the only model log some dumps carry: no langflow, no java-functions. */
+function extractRestLlm(msg){
+  const i = msg.indexOf('Rest response from LLM:');
+  if(i < 0) return null;
+  const out = {toolCalls: [], content: '', finish: null, usage: {}};
+
+  const id = /\[messageId=([^\]\s]+)\]/.exec(msg);
+  if(id) out.messageId = id[1];
+  const model = /"model"\s*:\s*"([^"]+)"/.exec(msg);
+  if(model) out.model = model[1];
+  const fr = /"finish_reason"\s*:\s*"([^"]+)"/.exec(msg);
+  if(fr) out.finish = fr[1];
+  ['prompt_tokens','completion_tokens','total_tokens'].forEach(k => {
+    const t = new RegExp('"' + k + '"\\s*:\\s*(\\d+)').exec(msg);
+    if(t) out.usage[k] = +t[1];
+  });
+
+  const mi = msg.indexOf('"message"', i);
+  if(mi >= 0){
+    const ci = msg.indexOf('"content"', mi);
+    if(ci >= 0){
+      let j = ci + '"content"'.length;
+      while(j < msg.length && msg[j] !== '"' && msg[j] !== 'n') j++;   // "…" or null
+      if(msg[j] === '"'){
+        const s = pyString(msg, j);
+        if(s) out.content = s.text;
+      }
+    }
+  }
+  const re = /"name"\s*:\s*"([\w.\-]+)"\s*,\s*"arguments"\s*:\s*"/g;
+  re.lastIndex = i;
+  let m;
+  while((m = re.exec(msg))){
+    const s = pyString(msg, re.lastIndex - 1);
+    out.toolCalls.push({name: m[1], args: s ? s.text : ''});
+    if(s) re.lastIndex = s.end + 1;
+  }
+  return out;
+}
+
 /* Classify an LLM turn by the shape of what it produced. */
 function classifyTurn(turn){
   if(turn.toolCalls.length) return {role: 'Решение вызвать инструмент', tag: 'call'};
@@ -1209,6 +1253,7 @@ function buildOne(traceId, recs){
   const offered = [];           // tool sets handed to individual model turns
   const spans = [];   // sub-agent [Request..Response] windows, for nesting
   let plan = null, finalAnswer = null, delivered = false, userQ = null, answerMsgId = null;
+  let reformQ = null;   // the rephrased question, in case the raw one never got logged
   const userQs = [];
   const userEvOf = new Map();   // question text -> its timeline event, for re-dating
   const seenMsgIds = new Map();
@@ -1292,18 +1337,23 @@ function buildOne(traceId, recs){
     const off = extractOfferedTools(msg);
     if(off) offered.push({ts: r.ts, messageId: off.messageId, tools: off.tools, partial: off.partial});
 
-    // --- LLM turns
-    if(app === 'alfagen-java-functions-service' || askLlmPhase(msg)){
-      const fromAsk = app !== 'alfagen-java-functions-service';
-      const turn = fromAsk ? askLlmTurn(msg, r) : extractLlmTurn(msg);
+    // --- LLM turns. Three services log the same turn in three shapes; which of them
+    // is present depends on the stack, so read all three and dedupe by content later.
+    const src = app === 'alfagen-java-functions-service' ? 'java' :
+                askLlmPhase(msg) ? 'ask' :
+                msg.indexOf('Rest response from LLM:') >= 0 ? 'rest' : null;
+    if(src){
+      const turn = src === 'ask' ? askLlmTurn(msg, r) :
+                   src === 'rest' ? extractRestLlm(msg) : extractLlmTurn(msg);
       if(turn){
         const cls = classifyTurn(turn);
-        const span = fromAsk ? turn.span : seenMsgIds.get(turn.messageId);
+        const span = src === 'ask' ? turn.span : seenMsgIds.get(turn.messageId);
         const ev = {ts: r.ts, kind: 'llm', depth: 0, chip: 'Модель', chipClass: 'c-llm',
                     title: cls.role, tag: cls.tag, app: app, model: turn.model,
                     usage: turn.usage, finish: turn.finish, messageId: turn.messageId,
                     startTs: span ? span.start : r.ts, ms: span ? (span.end - span.start) : null,
-                    fromAsk: fromAsk, contentKey: turnKey(turn.content), empty: !String(turn.content || '').trim()};
+                    src: src, content: turn.content,
+                    contentKey: turnKey(turn.content), empty: !String(turn.content || '').trim()};
 
         if(cls.tag === 'plan'){
           plan = cls.data;
@@ -1317,6 +1367,7 @@ function buildOne(traceId, recs){
           ev.quote = cls.data.query || '';
           ev.meta = cls.data.decision || '';
           ev.payload = turn.content;
+          if(!reformQ && cls.data.query) reformQ = String(cls.data.query).trim();
         } else if(cls.tag === 'guard'){
           const ok = cls.data.approved;
           ev.meta = (ok ? 'пропущено' : 'ЗАБЛОКИРОВАНО') +
@@ -1334,7 +1385,7 @@ function buildOne(traceId, recs){
         }
         // langflow does not log the tool calls themselves — a turn with no text is the
         // model handing back tool calls, and the [TOOL] records right after are them
-        if(fromAsk && ev.empty){
+        if(src === 'ask' && ev.empty){
           ev.title = 'Решение вызвать инструмент'; ev.tag = 'call'; ev.depth = 1;
           ev.meta = 'ответ без текста — далее идут вызовы инструментов';
         }
@@ -1437,15 +1488,18 @@ function buildOne(traceId, recs){
   });
 
   // dedupe repeated langflow/MCP emissions
-  // A stack that runs java-functions-service logs every model turn twice — once there
-  // ("Answer is ready", with tool calls and timing) and once in langflow ("[ASK LLM]").
-  // Keep the richer java-functions copy; the langflow one only carries this trace when
-  // java-functions is not in the picture at all.
-  const nativeTurns = events.filter(e => e.kind === 'llm' && !e.fromAsk);
+  // The same model turn can be logged by all three services at once. Keep the richest
+  // copy: java-functions carries tool calls and round-trip timing, the REST mirror
+  // carries tool calls and tokens, langflow's [ASK LLM] carries the least. Copies are
+  // only ever dropped in favour of a *different*, better source — two turns logged
+  // twice by the same service are two real turns.
+  const SRC_RANK = {java: 0, rest: 1, ask: 2};
+  const llmTurns = events.filter(e => e.kind === 'llm');
   const seenKeys = new Set();
   let clean = events.filter(e => {
-    if(e.kind === 'llm' && e.fromAsk &&
-       nativeTurns.some(n => n.contentKey === e.contentKey && Math.abs(n.ts - e.ts) < 60000)) return false;
+    if(e.kind === 'llm' && llmTurns.some(o =>
+         o !== e && SRC_RANK[o.src] < SRC_RANK[e.src] &&
+         o.contentKey === e.contentKey && Math.abs(o.ts - e.ts) < 60000)) return false;
     if(!e.dedupeKey) return true;
     if(seenKeys.has(e.dedupeKey)) return false;
     seenKeys.add(e.dedupeKey);
@@ -1524,6 +1578,36 @@ function buildOne(traceId, recs){
     if(e.kind === 'llm') e.depth = host ? 2 : (e.calls ? 1 : 0);
   });
   clean.sort((a, b) => a.ts - b.ts || a.depth - b.depth);
+
+  // The raw question is the last message in every prompt, so it is the first thing
+  // Kibana's ~5 KB cut removes. What survives is the rephrasing turn — show that, said
+  // plainly, instead of claiming the request is missing from the dump.
+  if(!userQ && reformQ){
+    userQ = {text: reformQ, ts: t0, reformulated: true};
+    userQs.push(userQ);
+    clean.push({ts: t0, kind: 'user', depth: 0, chip: 'Запрос', chipClass: 'c-user',
+                title: 'Запрос пользователя — после переформулировки', quote: reformQ,
+                meta: 'исходный текст сообщения в выгрузку не попал', qIndex: 0});
+    clean.sort((a, b) => a.ts - b.ts || a.depth - b.depth);
+  }
+
+  // No hand-off record in the dump — but the answer the user saw is an assembly, and
+  // the last model turn that produced one is it. Only a fallback: a real hand-off
+  // record always wins, because it proves the text left the service.
+  if(!finalAnswer){
+    for(let i = clean.length - 1; i >= 0; i--){
+      const e = clean[i];
+      if(e.kind !== 'llm' || !e.content || !/"type"\s*:\s*"assembly"/.test(e.content)) continue;
+      const text = humanizeAnswer(e.content.trim()).trim();
+      if(!text) break;
+      finalAnswer = text;
+      clean.push({ts: e.ts, kind: 'answer', depth: 0, chip: 'Ответ', chipClass: 'c-ans',
+                  title: 'Ответ собран моделью', quote: finalAnswer, app: e.app, full: true,
+                  meta: 'записи об отдаче ответа в канал в выгрузке нет'});
+      clean.sort((a, b) => a.ts - b.ts || a.depth - b.depth);
+      break;
+    }
+  }
 
   const mcpCalls = clean.filter(e => e.kind === 'mcp');
   const ragHits = clean.filter(e => e.kind === 'rag' && e.chunks != null);
@@ -1812,7 +1896,7 @@ function renderFiles(files){
 }
 
 /* Inner JS of the bootstrap embedded into a saved copy: on open it reads the
-   inlined logs and re-renders the whole report — same logic as make_report.py.
+   inlined logs and re-renders the whole report.
    Set as a <script> element's textContent, so no closing-tag escaping is needed
    here (there is deliberately no "</scr"+"ipt>" literal in this string). */
 const BOOTSTRAP_JS =
