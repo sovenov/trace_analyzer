@@ -1487,6 +1487,24 @@ function buildOne(traceId, recs){
     }
   });
 
+  // A sub-agent called several times in parallel gets one window per call, and the
+  // dump does not always carry a Response for each of them. A window left open runs to
+  // infinity and would adopt the whole rest of the trace — the answer and the delivery
+  // included. Close it where that same sub-agent last finished; if it never finished in
+  // these files, leave it with no window rather than let it swallow everything.
+  const closesOf = new Map();
+  spans.forEach(s => {
+    if(s.end === Infinity) return;
+    if(!closesOf.has(s.name)) closesOf.set(s.name, []);
+    closesOf.get(s.name).push(s.end);
+  });
+  closesOf.forEach(list => list.sort((a, b) => a - b));
+  spans.forEach(s => {
+    if(s.end !== Infinity) return;
+    const near = (closesOf.get(s.name) || []).find(t => t >= s.start);
+    s.end = near != null ? near : s.start;   // its siblings finished; so did it
+  });
+
   // dedupe repeated langflow/MCP emissions
   // The same model turn can be logged by all three services at once. Keep the richest
   // copy: java-functions carries tool calls and round-trip timing, the REST mirror
