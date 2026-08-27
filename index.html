@@ -951,9 +951,10 @@ function extractSubAgent(msg){
     const md = ho.metadata || {};
     if(md.server_name){ out.mcp = true; out.server = md.server_name; }
     else if(md.display_name) out.mcp = false;
+    // a Response states its own window, which beats pairing it with a Request record
     if(ho.start_time && ho.finish_time){
       const a = new Date(ho.start_time), b = new Date(ho.finish_time);
-      if(!isNaN(a) && !isNaN(b)) out.ms = b - a;
+      if(!isNaN(a) && !isNaN(b)){ out.startTs = a.getTime(); out.endTs = b.getTime(); out.ms = b - a; }
     }
   }
   const bi = msg.indexOf('| body=');
@@ -1398,16 +1399,30 @@ function buildOne(traceId, recs){
     if(sa){
       if(sa.mcp != null && !toolKind.has(sa.name)) toolKind.set(sa.name, {name: sa.name, mcp: sa.mcp, server: sa.server || null});
       if(sa.phase === 'Request'){
-        spans.push({name: sa.name, start: r.ts, end: Infinity, runId: sa.runId});
+        // provisional: the call has started, but nothing here says when it ends
+        spans.push({name: sa.name, start: r.ts, end: Infinity, runId: sa.runId, open: true});
         events.push({ts: r.ts, kind: 'subagent', phase: 'in', depth: 1, chip: 'Саб-агент', chipClass: 'c-sub',
                      title: 'Вызов ', name: sa.name, app: app,
                      meta: 'вход', payload: sa.body, dedupeKey: 'sub-req:' + sa.name + ':' + sa.runId});
       } else {
-        const sp = spans.filter(s => s.name === sa.name && s.end === Infinity).pop();
-        if(sp) sp.end = r.ts;
+        // The Response carries the true window. Trust it over pairing by name: the same
+        // sub-agent is called several times in parallel, run ids are sometimes eaten by
+        // masking, and a Request record does not always make it into the dump — matching
+        // the two by position lands a Request on somebody else's Response and stretches
+        // the window over half the trace.
+        let sp = spans.filter(s => s.open && s.name === sa.name &&
+                                   (sa.runId && s.runId === sa.runId)).pop() ||
+                 spans.filter(s => s.open && s.name === sa.name &&
+                                   (sa.startTs == null || Math.abs(s.start - sa.startTs) < 1500)).pop();
+        if(sa.startTs != null && sa.endTs != null){
+          if(sp){ sp.start = sa.startTs; sp.end = sa.endTs; sp.open = false; }
+          else spans.push({name: sa.name, start: sa.startTs, end: sa.endTs, runId: sa.runId, open: false});
+        } else if(sp){
+          sp.end = r.ts; sp.open = false;
+        }
         events.push({ts: r.ts, kind: 'subagent', phase: 'out', depth: 1, chip: 'Саб-агент', chipClass: 'c-sub',
                      title: 'Ответ ', name: sa.name, app: app, ms: sa.ms,
-                     startTs: sp ? sp.start : null,
+                     startTs: sa.startTs != null ? sa.startTs : (sp ? sp.start : null),
                      meta: 'статус: ' + (sa.status || '—'), payload: sa.body,
                      dedupeKey: 'sub-res:' + sa.name + ':' + sa.runId});
       }
@@ -1487,23 +1502,10 @@ function buildOne(traceId, recs){
     }
   });
 
-  // A sub-agent called several times in parallel gets one window per call, and the
-  // dump does not always carry a Response for each of them. A window left open runs to
-  // infinity and would adopt the whole rest of the trace — the answer and the delivery
-  // included. Close it where that same sub-agent last finished; if it never finished in
-  // these files, leave it with no window rather than let it swallow everything.
-  const closesOf = new Map();
-  spans.forEach(s => {
-    if(s.end === Infinity) return;
-    if(!closesOf.has(s.name)) closesOf.set(s.name, []);
-    closesOf.get(s.name).push(s.end);
-  });
-  closesOf.forEach(list => list.sort((a, b) => a - b));
-  spans.forEach(s => {
-    if(s.end !== Infinity) return;
-    const near = (closesOf.get(s.name) || []).find(t => t >= s.start);
-    s.end = near != null ? near : s.start;   // its siblings finished; so did it
-  });
+  // A call whose Response never reached these files has no known end. Left open it would
+  // run to infinity and adopt the whole rest of the trace — the answer and the delivery
+  // included — so give it no window at all instead of a guessed one.
+  spans.forEach(s => { if(s.end === Infinity) s.end = s.start; });
 
   // dedupe repeated langflow/MCP emissions
   // The same model turn can be logged by all three services at once. Keep the richest
