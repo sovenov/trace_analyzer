@@ -171,6 +171,20 @@ body{
 .section-head h2{font-family:var(--serif);font-weight:400;font-size:21px;margin:0}
 .section-head .hint{font-size:12px;color:var(--muted)}
 
+/* "expand/collapse every payload" pair, pinned to the right end of a section head */
+.section-head .headtools{margin-left:auto;display:flex;gap:6px;align-self:center}
+.foldbtn{
+  font-family:var(--mono);font-size:11.5px;color:var(--navy);
+  border:1px solid var(--rule);border-radius:2px;padding:2px 8px;
+  background:var(--paper-2);cursor:pointer;line-height:1.6;
+  display:inline-flex;align-items:center;gap:5px;
+}
+.foldbtn::before{content:"▸";font-size:9px}
+.foldbtn.close::before{content:"▾"}
+.foldbtn:hover{border-color:var(--navy)}
+.foldbtn:disabled{opacity:.4;cursor:default;border-color:var(--rule-soft)}
+.foldbtn:disabled:hover{border-color:var(--rule-soft)}
+
 /* a section that folds away: the raw log table starts closed, so a big trace does not
    open onto thousands of table rows */
 details.section>summary.section-head{cursor:pointer;list-style:none}
@@ -458,6 +472,8 @@ details.pay>summary{
   border-color:var(--rule);border-radius:8px;padding:4px 9px;background:var(--paper-2);
 }
 details.pay>summary:hover{border-color:#AECBFA;background:#F5F8FF}
+.foldbtn{border-radius:8px;padding:4px 10px}
+.foldbtn:hover{border-color:#AECBFA;background:#F5F8FF}
 pre.json{
   border-color:var(--rule-soft);border-radius:10px;background:#F8FAFD;padding:12px 14px;
 }
@@ -2238,7 +2254,11 @@ function renderReport(){
     subInv +
     mcpInv +
     '<div class="section"><div class="section-head"><h2>Хроника</h2>' +
-      '<span class="hint">' + (multiQ ? 'в трейсе несколько запросов — переключайте вкладки сверху' : 'отступ — глубина вызова, полоса справа — время') + '</span></div>' +
+      '<span class="hint">' + (multiQ ? 'в трейсе несколько запросов — переключайте вкладки сверху' : 'отступ — глубина вызова, полоса справа — время') + '</span>' +
+      '<span class="headtools">' +
+        '<button type="button" class="foldbtn" id="foldopen">раскрыть все</button>' +
+        '<button type="button" class="foldbtn close" id="foldshut">свернуть все</button>' +
+      '</span></div>' +
       '<div class="spine" id="spine">' + (rows || '<div class="empty">Значимых событий не найдено.</div>') + '</div></div>' +
     (tr.errors.length ? '<div class="section"><div class="section-head"><h2>Сбои и предупреждения</h2>' +
       '<span class="hint">' + tr.errorTotal + ' записей, свёрнуты по одинаковым сигнатурам</span></div>' +
@@ -2256,7 +2276,27 @@ function renderReport(){
       '</div><div id="rawtable"></div></details>';
 
   wireChronicle();
+  wireFolds();
   wireRaw(tr);
+}
+
+/* "раскрыть/свернуть все" over every payload fold in the chronicle — параметры запроса,
+   ответ инструмента, аргументы, полезная нагрузка. Rows hidden by the segment tabs are
+   folded too, so switching tabs does not reveal a different state than the buttons set. */
+function wireFolds(){
+  const open = $('#foldopen'), shut = $('#foldshut');
+  if(!open || !shut) return;
+  const folds = Array.from(document.querySelectorAll('#spine details.pay'));
+  if(!folds.length){
+    [open, shut].forEach(b => { b.disabled = true; b.title = 'в этой хронике нечего раскрывать'; });
+    return;
+  }
+  const label = ' (' + folds.length + ')';
+  open.textContent += label;
+  shut.textContent += label;
+  const setAll = v => folds.forEach(d => { d.open = v; });
+  open.onclick = () => setAll(true);
+  shut.onclick = () => setAll(false);
 }
 
 /* switch the whole report (verdict, stats, chronicle, answer) between requests */
