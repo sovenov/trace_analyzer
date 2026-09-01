@@ -91,16 +91,26 @@ body{
 .reset:hover{border-color:var(--ink);color:var(--ink)}
 
 /* ---------- trace tabs ---------- */
-.tabs{display:flex;flex-wrap:wrap;gap:0;margin:26px 0 0;border-bottom:1px solid var(--rule)}
+/* one trace per row, oldest at the top: the strip is read as a timeline, so the rows
+   stack instead of wrapping and the three columns line up down the list */
+.tabs{display:flex;flex-direction:column;align-items:stretch;gap:2px;margin:26px 0 0}
 .tab{
   font-family:var(--mono);font-size:12px;
-  background:none;border:1px solid transparent;border-bottom:none;
-  padding:7px 13px;cursor:pointer;color:var(--muted);border-radius:2px 2px 0 0;
+  display:grid;grid-template-columns:auto minmax(0,1fr) auto;
+  align-items:baseline;gap:14px;text-align:left;
+  background:none;border:1px solid transparent;
+  padding:7px 13px;cursor:pointer;color:var(--muted);border-radius:2px;
 }
 .tab[aria-selected="true"]{
-  background:var(--paper-2);border-color:var(--rule);
-  color:var(--ink);margin-bottom:-1px;
+  background:var(--paper-2);border-color:var(--rule);color:var(--ink);
 }
+.tab .ttime,.tab .tnum{color:var(--muted);font-variant-numeric:tabular-nums;white-space:nowrap}
+/* id · вопрос · cus, packed to the left. Only the question may shrink — the id and the
+   customer code are what you scan for, so they never get cut. */
+.tab .tmid{display:flex;align-items:baseline;gap:7px;min-width:0}
+.tab .tid{flex:none;white-space:nowrap}
+.tab .tq{flex:0 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.tab .tcus{flex:none;white-space:nowrap}
 
 /* ---------- dossier ---------- */
 .dossier{margin-top:26px}
@@ -381,20 +391,26 @@ body{background:var(--ground);letter-spacing:.01em}
 .reset.save{background:var(--navy);border-color:var(--navy);color:#fff}
 .reset.save:hover{background:#0A47B0;border-color:#0A47B0;color:#fff}
 
-.tabs{gap:6px;margin-top:24px;border:0;align-items:center}
+.tabs{gap:3px;margin-top:24px;border:0}
 .tabs-label{
-  flex-basis:100%;margin-bottom:2px;
+  margin-bottom:6px;
   color:var(--navy);font-size:11px;font-weight:600;letter-spacing:.1em;
 }
 .tab{
-  border:0;border-radius:20px;padding:8px 14px;background:transparent;
+  border:0;border-radius:10px;padding:9px 14px;background:transparent;
   font-family:var(--sans);font-size:12.5px;font-weight:500;color:var(--muted);
 }
 .tab .tid{font-family:var(--mono);font-size:12px}
+.tab .ttime{font-family:var(--mono);font-size:11.5px}
+.tab .tnum{font-size:11.5px}
+.tab .tq{font-family:var(--sans);font-size:12.5px}
+.tab .tcus{font-family:var(--mono);font-size:11.5px;color:var(--muted)}
+.tab[aria-selected="true"] .tcus{color:#0B57D0}
 .tab:hover{background:var(--paper)}
 .tab[aria-selected="true"]{
-  margin-bottom:0;border:0;background:#D3E3FD;color:#041E49;
+  border:0;background:#D3E3FD;color:#041E49;
 }
+.tab[aria-selected="true"] .ttime,.tab[aria-selected="true"] .tnum{color:#0B57D0}
 
 .dossier{margin-top:30px}
 .eyebrow{
@@ -761,6 +777,9 @@ function fileOrderKey(name){
   else if(m[1].length >= 16) n = Math.round(n/1000); // micros -> ms
   return n;
 }
+
+/* records the collector left without a traceId are grouped under this stand-in */
+const NO_TRACE = '(нет traceId)';
 
 const REFUSAL = [/нет данных/i, /не могу/i, /к сожалению/i, /не располагаю/i,
                  /отсутству\w* данн/i, /нет информации/i, /не удалось найти/i];
@@ -1264,7 +1283,7 @@ function buildTraces(fileEntries){
       const t = parseKibanaTs(l['@timestamp'] || l.timestamp);
       all.push({raw: l, t: t, ts: t ? t.getTime() : 0, srcFile: f.name,
                 app: l.app_id || '', msg: l.message || '', level: l.level || '',
-                logger: l.logger || l.logger_name || '', traceId: l.traceId || '(нет traceId)'});
+                logger: l.logger || l.logger_name || '', traceId: l.traceId || NO_TRACE});
     });
   });
   all.sort((a, b) => a.ts - b.ts);
@@ -1277,9 +1296,21 @@ function buildTraces(fileEntries){
 
   const traces = [];
   groups.forEach((recs, traceId) => traces.push(buildOne(traceId, recs)));
-  traces.sort((a, b) => b.records.length - a.records.length);
+  // chronological, so the tab strip reads top-down as a timeline. Records with no
+  // traceId are not a conversation at all, so they sit at the bottom whatever their
+  // timestamps say.
+  traces.sort((a, b) =>
+    (a.traceId === NO_TRACE) - (b.traceId === NO_TRACE) ||
+    (a.meta.from ? a.meta.from.getTime() : 0) - (b.meta.from ? b.meta.from.getTime() : 0));
 
-  return {traces: traces, files: ordered, total: all.length};
+  // the strip is ordered by time, but the trace worth opening first is the substantial
+  // one, not whichever happened earliest — keep that as the landing tab
+  let active = 0;
+  traces.forEach((t, i) => {
+    if(t.traceId !== NO_TRACE && t.records.length > traces[active].records.length) active = i;
+  });
+
+  return {traces: traces, files: ordered, total: all.length, active: active};
 }
 
 /* verdict + counters over a scoped slice of events/records — run once for the whole
@@ -1972,7 +2003,7 @@ async function loadFiles(list){
   const built = buildTraces(entries);
   STATE.traces = built.traces;
   STATE.files = built.files;
-  STATE.active = 0;
+  STATE.active = built.active;
   renderFiles(built.files.concat(broken.map(b => ({name: b.name, bad: b.why}))));
   renderTabs();
   renderReport();
@@ -2040,7 +2071,7 @@ const BOOTSTRAP_JS =
 '  var built = buildTraces(entries);\n' +
 '  STATE.raw = payload.files || [];\n' +
 '  STATE.brokenFiles = (payload.broken || []).slice();\n' +
-'  STATE.traces = built.traces; STATE.files = built.files; STATE.active = 0;\n' +
+'  STATE.traces = built.traces; STATE.files = built.files; STATE.active = built.active;\n' +
 '  renderFiles(built.files.concat(brokenChips));\n' +
 '  renderTabs(); renderReport();\n' +
 '})();';
@@ -2092,17 +2123,48 @@ function saveReport(){
   setTimeout(() => URL.revokeObjectURL(url), 4000);
 }
 
+/* A traceId identifies a row but does not describe it. What tells the rows apart at a
+   glance is what was asked and by whom, so each one reads "<id> - <вопрос> - <cus>";
+   whichever of the two is missing from the dump is simply left out. */
+function tabLabel(t){
+  const ctx = t.meta.ctx || {};
+  const q = (t.userQ && t.userQ.text ? String(t.userQ.text) : '').replace(/\s+/g, ' ').trim();
+  const cus = (t.userQ && t.userQ.cus) || ctx.cus || '';
+  return {
+    id: t.traceId,
+    q: q.length > 200 ? q.slice(0, 200) + '…' : q,
+    cus: String(cus || '').trim()
+  };
+}
+
 function renderTabs(){
   const tabs = $('#tabs');
   if(STATE.traces.length <= 1){ tabs.classList.add('hidden'); tabs.innerHTML = ''; return; }
   tabs.classList.remove('hidden');
   tabs.innerHTML = '<span class="tabs-label">TRACEID</span>' +
-    STATE.traces.map((t, i) =>
-    '<button class="tab" role="tab" data-i="' + i + '" title="' + esc(t.traceId) + '" aria-selected="' + (i === STATE.active) + '">' +
-    '<span class="tid">' + esc(t.traceId) + '</span> · ' + t.stats.records + ' зап.</button>').join('');
+    STATE.traces.map((t, i) => {
+    const l = tabLabel(t);
+    const full = [l.id, l.q, l.cus].filter(Boolean).join(' - ');
+    return '<button class="tab" role="tab" data-i="' + i + '" title="' + esc(full) + '" aria-selected="' + (i === STATE.active) + '">' +
+    '<span class="ttime">' + esc(fmtStamp(t.meta.from)) + '</span>' +
+    '<span class="tmid">' +
+      '<span class="tid">' + esc(l.id) + '</span>' +
+      (l.q ? '<span class="tq">- ' + esc(l.q) + '</span>' : '') +
+      (l.cus ? '<span class="tcus">- ' + esc(l.cus) + '</span>' : '') +
+    '</span>' +
+    '<span class="tnum">' + t.stats.records + ' зап.</span></button>';
+  }).join('');
   tabs.querySelectorAll('.tab').forEach(b => b.onclick = () => {
     STATE.active = +b.dataset.i; renderTabs(); renderReport();
   });
+}
+
+/* start of a trace, for the chronologically ordered tab strip. Dumps routinely span
+   several days, so the date is part of it. */
+function fmtStamp(d){
+  if(!d) return '—';
+  const p = n => String(n).padStart(2, '0');
+  return p(d.getDate()) + '.' + p(d.getMonth() + 1) + ' ' + p(d.getHours()) + ':' + p(d.getMinutes()) + ':' + p(d.getSeconds());
 }
 
 function fmtRel(s){
