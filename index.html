@@ -679,12 +679,76 @@ function firstJsonAfter(msg, marker){
   return b ? b.text : null;
 }
 
+/* Two collectors feed these dumps. The old one writes a record flat — app_id, traceId,
+   logger, level, message. The OpenTelemetry one nests the real log line under an
+   "envoy." prefix and the service identity under "resource.", leaving the top level
+   holding nothing but the raw JSON envelope in `message`: to every extractor below such
+   a record looks untraced, unattributed and unreadable, so it lands in the "(нет
+   traceId)" bucket with its payload unseen. A third variant stuffs that same envelope
+   into `message` as a JSON string with no envoy fields at all. Lift all of them back to
+   the flat shape before anything else looks at a record.
+   Runtimes disagree on spelling — java writes traceId/spanId, python trace_id/span_id —
+   so both are accepted, and "null" arrives as a literal string often enough to check. */
+function liftRecord(l){
+  if(!l || typeof l !== 'object') return l;
+  // the overwhelming majority of records are already flat — leave them untouched rather
+  // than shallow-copying every one of tens of thousands of 200-key objects
+  if(l.traceId && l.app_id && l['envoy.message'] == null && l['envoy.method'] == null) return l;
+  const val = v => (v == null || v === '' || v === 'null') ? null : v;
+  const pick = function(){
+    for(let i = 0; i < arguments.length; i++){ const v = val(l[arguments[i]]); if(v != null) return v; }
+    return null;
+  };
+  const hasEnvoyMsg = val(l['envoy.message']) != null;
+
+  // the envelope in `message` is only worth parsing when it is the sole copy of the line
+  let env = null;
+  if(!hasEnvoyMsg && !val(l.traceId)){
+    const raw = String(l.message == null ? '' : l.message).trim();
+    if(raw.charAt(0) === '{') env = safeJson(raw);
+    if(env && typeof env !== 'object') env = null;
+  }
+  const from = k => env ? val(env[k]) : null;
+
+  const traceId = pick('traceId', 'envoy.traceId', 'envoy.trace_id') || from('traceId') || from('trace_id');
+  const appId = pick('app_id', 'resource.service_name', 'resource.k8s_container_name', 'envoy.service');
+  // an istio access log has no message of its own — state the hop it recorded
+  const access = (!hasEnvoyMsg && !env && val(l['envoy.method']))
+    ? val(l['envoy.method']) + ' ' + (val(l['envoy.path']) || '') +
+      ' -> ' + (val(l['envoy.response_code']) || '?') +
+      (val(l['envoy.duration']) != null ? ' | ' + l['envoy.duration'] + ' мс' : '')
+    : null;
+  const message = pick('envoy.message') || from('message') || access;
+
+  if(!traceId && !appId && !message) return l;
+
+  const out = Object.assign({}, l);
+  const put = (k, v) => { if(v != null && !val(out[k])) out[k] = v; };
+  put('traceId', traceId);
+  put('app_id', appId);
+  // not put(): what sits in `message` on these records is the raw envelope, with the
+  // real line escaped inside it. Every extractor below reads `message`, so the lifted
+  // copy has to replace it rather than politely stand aside.
+  if(message != null) out.message = message;
+  put('spanId', pick('envoy.spanId', 'envoy.span_id') || from('spanId') || from('span_id'));
+  put('logger', pick('envoy.logger', 'logger_name') || from('logger'));
+  put('exception', pick('envoy.exception') || from('exception'));
+  put('pod_name', pick('resource.k8s_pod_name'));
+  put('namespace', pick('resource.k8s_namespace_name'));
+  put('app_version', pick('resource.service_version'));
+  // python lowercases its levels; the raw-log filter lists them verbatim, so one casing
+  const lvl = pick('level', 'envoy.level') || from('level');
+  if(lvl != null) out.level = String(lvl).toUpperCase();
+  return out;
+}
+
 /* Accept {logs:[...]}, [...], {hits:{hits:[...]}} */
 function normalizeFile(json){
-  if(Array.isArray(json)) return {logs: json, url: ''};
-  if(json && Array.isArray(json.logs)) return {logs: json.logs, url: json.url || ''};
+  const lift = arr => arr.map(liftRecord);
+  if(Array.isArray(json)) return {logs: lift(json), url: ''};
+  if(json && Array.isArray(json.logs)) return {logs: lift(json.logs), url: json.url || ''};
   if(json && json.hits && Array.isArray(json.hits.hits)){
-    return {logs: json.hits.hits.map(h => Object.assign({}, h._source, {_id: h._id})), url: ''};
+    return {logs: lift(json.hits.hits.map(h => Object.assign({}, h._source, {_id: h._id}))), url: ''};
   }
   return null;
 }
@@ -1102,6 +1166,8 @@ function scrapeAssembly(txt){
   while((m = re.exec(txt))){
     (m[1] === 'message' ? bubbles : chips).push(unesc(m[2]));
   }
+  const card = /"type"\s*:\s*"asset"\s*,\s*"body"\s*:\s*\{[^}]*?"title"\s*:\s*"((?:[^"\\]|\\.)*)"/g;
+  while((m = card.exec(txt))) bubbles.push('[карточка] ' + unesc(m[1]));
   if(!bubbles.length && !chips.length) return null;
   let out = bubbles.join('\n\n');
   if(chips.length) out += (out ? '\n\n' : '') + 'Кнопки: ' + chips.join(' · ');
@@ -1125,7 +1191,15 @@ function humanizeAnswer(txt, depth){
         if(depth < 4 && /"type"\s*:\s*"assembly"/.test(t)) t = humanizeAnswer(t, depth + 1);
         bubbles.push(t);
       }
-      else if(n.type === 'chips' && n.body && n.body.text) chips.push(String(n.body.text));
+      // the chip node was renamed on the AGENTHUB channel; both names are in the wild
+      else if((n.type === 'chips' || n.type === 'dialogSuggestion') && n.body && n.body.text){
+        chips.push(String(n.body.text));
+      }
+      // an instrument widget: the user saw a card, not a sentence. Name it, so the
+      // answer does not quietly lose a bubble that was on the screen.
+      else if(n.type === 'asset' && n.body && (n.body.title || n.body.subtitle)){
+        bubbles.push('[карточка] ' + [n.body.title, n.body.subtitle].filter(Boolean).join(' · '));
+      }
       if(Array.isArray(n.children)) walk(n.children);
     });
   })(o.children);
@@ -1190,7 +1264,7 @@ function buildTraces(fileEntries){
       const t = parseKibanaTs(l['@timestamp'] || l.timestamp);
       all.push({raw: l, t: t, ts: t ? t.getTime() : 0, srcFile: f.name,
                 app: l.app_id || '', msg: l.message || '', level: l.level || '',
-                logger: l.logger || '', traceId: l.traceId || '(нет traceId)'});
+                logger: l.logger || l.logger_name || '', traceId: l.traceId || '(нет traceId)'});
     });
   });
   all.sort((a, b) => a.ts - b.ts);
