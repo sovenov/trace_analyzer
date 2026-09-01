@@ -101,9 +101,18 @@ body{
   background:none;border:1px solid transparent;
   padding:7px 13px;cursor:pointer;color:var(--muted);border-radius:2px;
 }
-.tab[aria-selected="true"]{
-  background:var(--paper-2);border-color:var(--rule);color:var(--ink);
+.tabrow{display:flex;align-items:stretch;gap:2px;border-radius:2px}
+.tabrow .tab{flex:1 1 auto;min-width:0}
+.tabrow.on{background:var(--paper-2);outline:1px solid var(--rule)}
+.tab[aria-selected="true"]{color:var(--ink)}
+/* per-trace export, pinned past the record count */
+.tabdl{
+  flex:none;width:30px;display:inline-flex;align-items:center;justify-content:center;
+  background:none;border:1px solid transparent;border-radius:2px;
+  color:var(--muted);cursor:pointer;padding:0;
 }
+.tabdl:hover{color:var(--navy);border-color:var(--rule);background:var(--paper-2)}
+.tabdl:focus-visible{outline:2px solid var(--navy);outline-offset:-2px}
 .tab .ttime,.tab .tnum{color:var(--muted);font-variant-numeric:tabular-nums;white-space:nowrap}
 /* id · вопрос · cus, packed to the left. Only the question may shrink — the id and the
    customer code are what you scan for, so they never get cut. */
@@ -264,6 +273,34 @@ details.section>summary.section-head:focus-visible h2{color:var(--navy)}
 }
 .quote.full{color:var(--ink)}
 
+/* Inside an answer, a chip row and an instrument card are things the report *describes*,
+   not words the assistant wrote. Give them a border and a label so they never read as
+   part of the text, and let them open to the JSON node they stand for. */
+.quote.full.answer{white-space:normal}
+.abody{white-space:pre-wrap}
+.abody + .abody{margin-top:12px}
+details.synth{
+  margin-top:11px;border:1px dashed var(--rule);border-radius:3px;
+  background:var(--paper-2);
+}
+details.synth>summary{
+  cursor:pointer;list-style:none;display:flex;align-items:baseline;gap:9px;
+  padding:7px 10px;font-size:13px;color:var(--ink-soft);
+}
+details.synth>summary::-webkit-details-marker{display:none}
+details.synth>summary::before{content:"▸";font-size:9px;color:var(--muted)}
+details.synth[open]>summary::before{content:"▾"}
+details.synth>summary:hover{background:var(--paper)}
+.slab{
+  flex:none;font-family:var(--mono);font-size:9.5px;letter-spacing:.09em;
+  text-transform:uppercase;padding:2px 6px;border-radius:2px;
+  background:var(--rule-soft);color:var(--muted);
+}
+.synth.asset>summary .slab{background:#FEF7E0;color:var(--amber)}
+.synth.chips>summary .slab{background:#E6F4EA;color:var(--forest)}
+.stxt{min-width:0}
+details.synth>pre.json{margin:0 10px 10px}
+
 details.pay{margin-top:7px}
 details.pay>summary{
   cursor:pointer;font-family:var(--mono);font-size:11.5px;color:var(--navy);
@@ -407,9 +444,13 @@ body{background:var(--ground);letter-spacing:.01em}
 .tab .tcus{font-family:var(--mono);font-size:11.5px;color:var(--muted)}
 .tab[aria-selected="true"] .tcus{color:#0B57D0}
 .tab:hover{background:var(--paper)}
-.tab[aria-selected="true"]{
-  border:0;background:#D3E3FD;color:#041E49;
-}
+.tabrow{border-radius:10px;gap:0}
+.tabrow.on{background:#D3E3FD;outline:0}
+.tab[aria-selected="true"]{border:0;background:transparent;color:#041E49}
+.tabdl{border-radius:10px;width:34px}
+.tabdl:hover{color:var(--navy);background:var(--paper);border-color:transparent}
+.tabrow.on .tabdl{color:#0B57D0}
+.tabrow.on .tabdl:hover{background:rgba(255,255,255,.6)}
 .tab[aria-selected="true"] .ttime,.tab[aria-selected="true"] .tnum{color:#0B57D0}
 
 .dossier{margin-top:30px}
@@ -722,7 +763,18 @@ function liftRecord(l){
   if(!hasEnvoyMsg && !val(l.traceId)){
     const raw = String(l.message == null ? '' : l.message).trim();
     if(raw.charAt(0) === '{') env = safeJson(raw);
-    if(env && typeof env !== 'object') env = null;
+    // caddy blanks its timestamps into runs of asterisks, which no JSON parser survives.
+    // Repair only for that shape: a caddy access log never carries answer text, so a
+    // mangled number costs nothing there, while the same repair applied to any envelope
+    // would eat the "**0,05%**" markdown out of a real answer.
+    if(!env && raw.indexOf('"logger":"http.log.access') >= 0){
+      env = safeJson(raw.replace(/:\s*\*{2,}[\d.\s*]*(?=\s*[,}\]])/g, ': 0'));
+    }
+    // a parsed object counts as an envelope only if it actually wraps a log line. An
+    // istio access log is JSON too, but carries no message of its own — treating it as
+    // an envelope swallows the record and leaves the raw blob on screen, so let it fall
+    // through to the access-log rendering below.
+    if(!env || typeof env !== 'object' || (val(env.message) == null && val(env.msg) == null)) env = null;
   }
   const from = k => env ? val(env[k]) : null;
 
@@ -734,7 +786,15 @@ function liftRecord(l){
       ' -> ' + (val(l['envoy.response_code']) || '?') +
       (val(l['envoy.duration']) != null ? ' | ' + l['envoy.duration'] + ' мс' : '')
     : null;
-  const message = pick('envoy.message') || from('message') || access;
+  // caddy writes its access log as JSON with `msg` instead of `message`, and the useful
+  // part is the request it handled, not the constant "handled request" it always says
+  const req = env && env.request && typeof env.request === 'object' ? env.request : null;
+  const caddy = (env && val(env.msg) != null && req)
+    ? (val(req.method) || '?') + ' ' + (val(req.uri) || '') +
+      ' -> ' + (val(env.status) || '?') +
+      (env.duration != null && !isNaN(+env.duration) ? ' | ' + Math.round(+env.duration * 1000) + ' мс' : '')
+    : null;
+  const message = pick('envoy.message') || caddy || from('message') || from('msg') || access;
 
   if(!traceId && !appId && !message) return l;
 
@@ -753,7 +813,13 @@ function liftRecord(l){
   put('namespace', pick('resource.k8s_namespace_name'));
   put('app_version', pick('resource.service_version'));
   // python lowercases its levels; the raw-log filter lists them verbatim, so one casing
-  const lvl = pick('level', 'envoy.level') || from('level');
+  let lvl = pick('level', 'envoy.level') || from('level');
+  // an access log has no level of its own — take it from the status it recorded, so a
+  // failing hop in the mesh still reaches the errors section
+  if(lvl == null && access != null){
+    const code = +val(l['envoy.response_code']);
+    lvl = code >= 500 ? 'ERROR' : code >= 400 ? 'WARN' : 'INFO';
+  }
   if(lvl != null) out.level = String(lvl).toUpperCase();
   return out;
 }
@@ -806,7 +872,8 @@ function extractUser(msg, app){
                  os: o.operation_system || md.operationSystem,
                  segment: o.segment || md.segment};
       const ctx = {};
-      ['cus','channelApp','deviceModel','segment','operationSystem','mobileUserRole','am_version']
+      ['cus','channelApp','deviceModel','segment','operationSystem','mobileUserRole','am_version',
+       'firstName','lastName','middleName','nickname']
         .forEach(k => { if(md[k]) ctx[k] = md[k]; });
       if(Object.keys(ctx).length) u.ctx = ctx;
       return u;
@@ -1155,7 +1222,9 @@ function extractFinalAnswer(msg, app){
   }
   // async stack: comod-adapter posts the answer to the channel. The same call carries
   // intermediate "thinking" bubbles too — only status REPLY is the real answer.
-  if(msg.indexOf('COMOD answer send request') >= 0 && /"status"\s*:\s*"REPLY"/.test(msg)){
+  if((msg.indexOf('COMOD answer send request') >= 0 ||
+      msg.indexOf('Success sent answer for comod') >= 0) &&
+     /"status"\s*:\s*"REPLY"/.test(msg)){
     const at = msg.indexOf('{"type":"assembly"');
     if(at < 0) return null;
     const id = /messageId='([^']*)'/.exec(msg);
@@ -1164,7 +1233,8 @@ function extractFinalAnswer(msg, app){
     // langflow access log is missing from the dump
     const ctx = {};
     const md = safeJson(firstJsonAfter(msg, '{"type":"metadata","body":')) || {};
-    ['cus','channelApp','deviceModel','segment','operationSystem','mobileUserRole','am_version']
+    ['cus','channelApp','deviceModel','segment','operationSystem','mobileUserRole','am_version',
+     'firstName','lastName','middleName','nickname']
       .forEach(k => { if(md[k]) ctx[k] = md[k]; });
     const cus = /"cus"\s*:\s*"([^"]+)"/.exec(msg);
     if(!ctx.cus && cus) ctx.cus = cus[1];
@@ -1193,38 +1263,59 @@ function scrapeAssembly(txt){
   return out;
 }
 
-function humanizeAnswer(txt, depth){
+/* The answer split into what it is made of, so the report can tell the words the user
+   read apart from the widgets we only *describe* - a chip row, an instrument card.
+   Returns null when `txt` is not an assembly at all. Every part keeps the node it came
+   from, so the report can show the JSON behind a described element on demand. */
+function answerParts(txt, depth){
   depth = depth || 0;
   const o = safeJson(txt);
-  if(!(o && o.type === 'assembly' && Array.isArray(o.children))){
-    if(/"type"\s*:\s*"assembly"/.test(txt)) return scrapeAssembly(txt) || txt;
-    return txt;
-  }
-  const bubbles = [], chips = [];
+  if(!(o && o.type === 'assembly' && Array.isArray(o.children))) return null;
+  const parts = [], chips = [];
   (function walk(nodes){
     nodes.forEach(n => {
       if(!n || typeof n !== 'object') return;
       if(n.type === 'message' && n.body && n.body.text){
         let t = String(n.body.text);
-        // a bubble's text is sometimes itself a serialized assembly — unwrap it
+        // a bubble's text is sometimes itself a serialized assembly - unwrap it
         if(depth < 4 && /"type"\s*:\s*"assembly"/.test(t)) t = humanizeAnswer(t, depth + 1);
-        bubbles.push(t);
+        parts.push({kind: 'text', text: t});
       }
       // the chip node was renamed on the AGENTHUB channel; both names are in the wild
       else if((n.type === 'chips' || n.type === 'dialogSuggestion') && n.body && n.body.text){
-        chips.push(String(n.body.text));
+        chips.push(n);
       }
       // an instrument widget: the user saw a card, not a sentence. Name it, so the
       // answer does not quietly lose a bubble that was on the screen.
       else if(n.type === 'asset' && n.body && (n.body.title || n.body.subtitle)){
-        bubbles.push('[карточка] ' + [n.body.title, n.body.subtitle].filter(Boolean).join(' · '));
+        parts.push({kind: 'asset', node: n,
+                    text: [n.body.title, n.body.subtitle].filter(Boolean).join(' · ')});
       }
       if(Array.isArray(n.children)) walk(n.children);
     });
   })(o.children);
-  let out = bubbles.join('\n\n');
-  if(chips.length) out += (out ? '\n\n' : '') + 'Кнопки: ' + chips.join(' · ');
-  return out || txt;
+  if(chips.length) parts.push({kind: 'chips', node: chips,
+                               text: chips.map(c => String(c.body.text)).join(' · ')});
+  return parts.length ? parts : null;
+}
+
+/* Flatten the parts back to the plain string the rest of the code searches and compares
+   on. The bracketed labels mark the two kinds the user did not read as prose. */
+function partsToText(parts){
+  if(!parts) return '';
+  const body = parts.filter(p => p.kind !== 'chips')
+    .map(p => p.kind === 'asset' ? '[карточка] ' + p.text : p.text).join('\n\n');
+  const chips = parts.filter(p => p.kind === 'chips').map(p => p.text).join(' · ');
+  return body + (chips ? (body ? '\n\n' : '') + 'Кнопки: ' + chips : '');
+}
+
+function humanizeAnswer(txt, depth){
+  const parts = answerParts(txt, depth);
+  if(!parts){
+    if(/"type"\s*:\s*"assembly"/.test(txt)) return scrapeAssembly(txt) || txt;
+    return txt;
+  }
+  return partsToText(parts) || txt;
 }
 
 function extractDelivery(msg){
@@ -1603,11 +1694,13 @@ function buildOne(traceId, recs){
     // --- final answer + delivery
     const fa = extractFinalAnswer(msg, app);
     if(fa && fa.ctx) meta.ctx = Object.assign(meta.ctx || {}, fa.ctx);
+    if(fa && fa.messageId) meta.messageId = meta.messageId || fa.messageId;
     if(fa && fa.text && fa.text.trim()){
+      const faParts = answerParts(fa.text.trim());
       finalAnswer = humanizeAnswer(fa.text.trim()).trim();
       if(fa.messageId) answerMsgId = fa.messageId;
       events.push({ts: r.ts, kind: 'answer', depth: 0, chip: 'Ответ', chipClass: 'c-ans',
-                   title: 'Ответ отдан в сессию', quote: finalAnswer, app: app, full: true});
+                   title: 'Ответ отдан в сессию', parts: faParts, quote: finalAnswer, app: app, full: true});
     }
     const dl = extractDelivery(msg);
     if(dl){
@@ -1617,6 +1710,7 @@ function buildOne(traceId, recs){
       else if(dl.kind === 'sent'){
         delivered = true;
         meta.userId = dl.userId || meta.userId;
+        meta.messageId = meta.messageId || dl.messageId || null;
         events.push({ts: r.ts, kind: 'answer', depth: 0, chip: 'Доставка', chipClass: 'c-ans',
                      title: 'Ответ отправлен пользователю', app: app,
                      meta: dl.userId ? 'userId ' + dl.userId : ''});
@@ -1753,8 +1847,9 @@ function buildOne(traceId, recs){
       const text = humanizeAnswer(e.content.trim()).trim();
       if(!text) break;
       finalAnswer = text;
+      const evParts = answerParts(e.content.trim());
       clean.push({ts: e.ts, kind: 'answer', depth: 0, chip: 'Ответ', chipClass: 'c-ans',
-                  title: 'Ответ собран моделью', quote: finalAnswer, app: e.app, full: true,
+                  title: 'Ответ собран моделью', parts: evParts, quote: finalAnswer, app: e.app, full: true,
                   meta: 'записи об отдаче ответа в канал в выгрузке нет'});
       clean.sort((a, b) => a.ts - b.ts || a.depth - b.depth);
       break;
@@ -1776,6 +1871,10 @@ function buildOne(traceId, recs){
   meta.spanMs = t1 - t0;
   clean.forEach(e => { e.rel = (e.ts - t0) / 1000; });
   clean = clean.filter(e => e.ts <= tEnd + 1000);
+
+  // the parts behind the answer that actually shipped, for the rich rendering upstairs
+  const answerEv = clean.filter(e => e.kind === 'answer' && e.parts).pop();
+  const answerEvParts = answerEv ? answerEv.parts : null;
 
   const errs = Array.from(errorGroups.values()).sort((a, b) => b.count - a.count);
   const errTotal = errs.reduce((a, g) => a + g.count, 0);
@@ -1935,6 +2034,7 @@ function buildOne(traceId, recs){
     const planEv = segEvents.filter(e => e.tag === 'plan').pop();
     const ansEv = segEvents.filter(e => e.kind === 'answer' && e.quote).pop();
     const segAnswer = ansEv ? ansEv.quote : null;
+    const segParts = ansEv ? ansEv.parts : null;
     const segDelivered = segEvents.some(e => e.kind === 'answer' && /отправлен пользователю/.test(e.title || ''));
     const segErrs = errs.map(g => Object.assign({}, g, {count: g.tsList.filter(ts => segOf(ts) === i).length}))
                         .filter(g => g.count > 0);
@@ -1943,12 +2043,12 @@ function buildOne(traceId, recs){
       finalAnswer: segAnswer, delivered: segDelivered, allAvailable: allAvailable,
       errs: segErrs, seconds: Math.max((segEnd - q.ts) / 1000, 0)});
     return {index: i, question: q, findings: view.findings, stats: view.stats,
-            finalAnswer: segAnswer, delivered: segDelivered};
+            finalAnswer: segAnswer, answerParts: segParts, delivered: segDelivered};
   });
 
   return {
     traceId: traceId, meta: meta, records: recs, events: clean,
-    userQ: userQ, userQs: userQs, plan: plan, finalAnswer: finalAnswer, delivered: delivered,
+    userQ: userQ, userQs: userQs, plan: plan, finalAnswer: finalAnswer, answerParts: answerEvParts, delivered: delivered,
     availableTools: allAvailable, calledMcp: calledMcp, calledSubs: calledSubs,
     plannedSubs: plannedNames,
     subAgents: subAgents, mainAgent: mainAgent, mcpGroups: mcpGroups,
@@ -2114,14 +2214,52 @@ function saveReport(){
   bootScript.textContent = BOOTSTRAP_JS;
   body.appendChild(bootScript);
 
-  const html = '<!DOCTYPE html>\n' + clone.outerHTML;
-  const blob = new Blob([html], {type: 'text/html;charset=utf-8'});
+  downloadBlob('<!DOCTYPE html>\n' + clone.outerHTML, 'text/html;charset=utf-8',
+               'trace_report_' + tstamp() + '.html');
+}
+
+function downloadBlob(text, mime, filename){
+  const blob = new Blob([text], {type: mime});
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
-  a.href = url; a.download = 'trace_report_' + tstamp() + '.html';
+  a.href = url; a.download = filename;
   document.body.appendChild(a); a.click(); a.remove();
   setTimeout(() => URL.revokeObjectURL(url), 4000);
 }
+
+/* The documents exactly as Kibana handed them over, keyed by _id. A per-trace export
+   ships those rather than the analyzer's normalized copies, so the file stays
+   comparable with the original dump - and loads straight back in here. */
+function rawById(){
+  const map = new Map();
+  (STATE.raw || []).forEach(f => {
+    const j = f.json;
+    const arr = Array.isArray(j) ? j
+      : (j && Array.isArray(j.logs)) ? j.logs
+      : (j && j.hits && Array.isArray(j.hits.hits))
+        ? j.hits.hits.map(h => Object.assign({}, h._source, {_id: h._id}))
+        : [];
+    arr.forEach(l => { if(l && l._id != null && !map.has(l._id)) map.set(l._id, l); });
+  });
+  return map;
+}
+
+/* Every record of one trace, in its own file, in the shape the loader accepts. */
+function exportTrace(i){
+  const t = STATE.traces[i];
+  if(!t) return;
+  const src = rawById();
+  // records are already in @timestamp order; fall back to the normalized copy when the
+  // original is not in STATE.raw (a report opened from a saved copy)
+  const logs = t.records.map(r => (r.raw && src.get(r.raw._id)) || r.raw);
+  const slug = (t.traceId === NO_TRACE ? 'bez-traceid' : t.traceId).replace(/[^\w.-]+/g, '_');
+  downloadBlob(JSON.stringify({url: '', logs: logs}), 'application/json;charset=utf-8',
+               'trace_' + slug + '_' + tstamp() + '.json');
+}
+
+const DL_ICON = '<svg viewBox="0 0 16 16" width="13" height="13" aria-hidden="true">' +
+  '<path d="M8 1.8v7.4M4.7 6.2 8 9.5l3.3-3.3M2.6 13.2h10.8" fill="none" stroke="currentColor" ' +
+  'stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>';
 
 /* A traceId identifies a row but does not describe it. What tells the rows apart at a
    glance is what was asked and by whom, so each one reads "<id> - <вопрос> - <cus>";
@@ -2145,17 +2283,26 @@ function renderTabs(){
     STATE.traces.map((t, i) => {
     const l = tabLabel(t);
     const full = [l.id, l.q, l.cus].filter(Boolean).join(' - ');
-    return '<button class="tab" role="tab" data-i="' + i + '" title="' + esc(full) + '" aria-selected="' + (i === STATE.active) + '">' +
+    // the row is a pair of siblings, not nested buttons: the tab selects the trace,
+    // the trailing one downloads it
+    return '<div class="tabrow' + (i === STATE.active ? ' on' : '') + '">' +
+    '<button class="tab" role="tab" data-i="' + i + '" title="' + esc(full) + '" aria-selected="' + (i === STATE.active) + '">' +
     '<span class="ttime">' + esc(fmtStamp(t.meta.from)) + '</span>' +
     '<span class="tmid">' +
       '<span class="tid">' + esc(l.id) + '</span>' +
       (l.q ? '<span class="tq">- ' + esc(l.q) + '</span>' : '') +
       (l.cus ? '<span class="tcus">- ' + esc(l.cus) + '</span>' : '') +
     '</span>' +
-    '<span class="tnum">' + t.stats.records + ' зап.</span></button>';
+    '<span class="tnum">' + t.stats.records + ' зап.</span></button>' +
+    '<button class="tabdl" data-i="' + i + '" title="Выгрузить логи этого traceId в JSON (' +
+      t.stats.records + ')" aria-label="Выгрузить логи этого traceId в JSON">' + DL_ICON + '</button>' +
+    '</div>';
   }).join('');
   tabs.querySelectorAll('.tab').forEach(b => b.onclick = () => {
     STATE.active = +b.dataset.i; renderTabs(); renderReport();
+  });
+  tabs.querySelectorAll('.tabdl').forEach(b => b.onclick = e => {
+    e.stopPropagation(); exportTrace(+b.dataset.i);
   });
 }
 
@@ -2203,8 +2350,13 @@ function renderReport(){
   const tr = STATE.traces[STATE.active];
   const m = tr.meta, ctx = m.ctx || {};
 
+  // the client profile carries the name in pieces, and not every dump has all three
+  const fio = [ctx.lastName, ctx.firstName, ctx.middleName].filter(Boolean).join(' ').trim()
+              || (ctx.nickname || '').trim();
   const idcells = [
     ['traceId', tr.traceId],
+    ['messageId', m.messageId || '—'],
+    ['ФИО', fio || '—'],
     ['cus', (tr.userQ && tr.userQ.cus) || ctx.cus || '—'],
     ['sessionId', (tr.userQ && tr.userQ.session) || '—'],
     ['канал', (tr.userQ && tr.userQ.channel) || ctx.channelApp || '—'],
@@ -2227,9 +2379,25 @@ function renderReport(){
     ['чанков RAG', st.rag, ''],
     ['секунд', st.seconds.toFixed(1), '']
   ].map(s => '<div class="stat ' + s[2] + '"><div class="v">' + esc(s[1]) + '</div><div class="k">' + esc(s[0]) + '</div></div>').join('') + '</div>';
-  const answerHtml = ans => ans ?
-    '<div class="section"><div class="section-head"><h2>Что получил пользователь</h2></div>' +
-    '<div class="quote full" style="margin-top:14px;font-size:16px">' + esc(ans) + '</div></div>' : '';
+  /* The answer as the user saw it, except for the pieces that were not prose: a chip row
+     and an instrument card are things we only describe. Mark those so nobody reads
+     "[карточка] …" as something the assistant actually wrote, and let them open to the
+     JSON node behind them. */
+  const answerBody = (parts, ans) => {
+    if(!parts || !parts.length) return '<div class="quote full answer">' + esc(ans) + '</div>';
+    return '<div class="quote full answer">' + parts.map(p => {
+      if(p.kind === 'text') return '<div class="abody">' + esc(p.text) + '</div>';
+      const label = p.kind === 'asset' ? 'карточка' : 'кнопки';
+      return '<details class="synth ' + p.kind + '"><summary>' +
+        '<span class="slab">' + label + '</span>' +
+        '<span class="stxt">' + esc(p.text) + '</span></summary>' +
+        '<pre class="json">' + esc(pretty(JSON.stringify(p.node))) + '</pre></details>';
+    }).join('') + '</div>';
+  };
+  const answerHtml = (ans, parts) => ans ?
+    '<div class="section"><div class="section-head"><h2>Что получил пользователь</h2>' +
+    '<span class="hint">подсвеченное — не текст ответа, а виджеты; нажмите, чтобы увидеть их JSON</span></div>' +
+    answerBody(parts, ans) + '</div>' : '';
 
   // one traceId can carry several user questions; split the chronicle by them
   const questions = (tr.userQs && tr.userQs.length) ? tr.userQs : (tr.userQ ? [tr.userQ] : []);
@@ -2259,7 +2427,8 @@ function renderReport(){
     if(e.under) inner += '<div class="meta">внутри <b>' + esc(e.under) + '</b></div>';
     if(e.meta) inner += '<div class="meta">' + esc(e.meta) + '</div>';
     if(e.usage && e.usage.total_tokens) inner += '<div class="meta">токены: ' + e.usage.prompt_tokens + ' → ' + e.usage.completion_tokens + '</div>';
-    if(e.quote) inner += '<div class="quote' + (e.full ? ' full' : '') + '">' + esc(e.quote) + '</div>';
+    if(e.kind === 'answer' && e.parts) inner += answerBody(e.parts, e.quote);
+    else if(e.quote) inner += '<div class="quote' + (e.full ? ' full' : '') + '">' + esc(e.quote) + '</div>';
     if(e.calls) inner += e.calls.map(c => payloadBlock('аргументы ' + c.name, c.args)).join('');
     if(e.params) inner += payloadBlock('параметры запроса', e.params);
     if(e.result) inner += payloadBlock('ответ инструмента', e.result);
@@ -2305,8 +2474,9 @@ function renderReport(){
     ? seg('all', statsHtml(tr.stats)) + segs.map(s => seg(s.index, statsHtml(s.stats))).join('')
     : statsHtml(tr.stats);
   const answerBlock = multiQ
-    ? seg('all', answerHtml(tr.finalAnswer)) + segs.map(s => seg(s.index, answerHtml(s.finalAnswer))).join('')
-    : answerHtml(tr.finalAnswer);
+    ? seg('all', answerHtml(tr.finalAnswer, tr.answerParts)) +
+      segs.map(s => seg(s.index, answerHtml(s.finalAnswer, s.answerParts))).join('')
+    : answerHtml(tr.finalAnswer, tr.answerParts);
 
   // ---- sub-agents: what each one had on hand and what it actually used
   const agentCard = (a, root) => {
@@ -2422,7 +2592,7 @@ function renderReport(){
 function wireFolds(){
   const open = $('#foldopen'), shut = $('#foldshut');
   if(!open || !shut) return;
-  const folds = Array.from(document.querySelectorAll('#spine details.pay'));
+  const folds = Array.from(document.querySelectorAll('#spine details.pay, #spine details.synth'));
   if(!folds.length){
     [open, shut].forEach(b => { b.disabled = true; b.title = 'в этой хронике нечего раскрывать'; });
     return;
