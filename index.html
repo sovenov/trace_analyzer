@@ -114,12 +114,13 @@ body{
 .tabdl:hover{color:var(--navy);border-color:var(--rule);background:var(--paper-2)}
 .tabdl:focus-visible{outline:2px solid var(--navy);outline-offset:-2px}
 .tab .ttime,.tab .tnum{color:var(--muted);font-variant-numeric:tabular-nums;white-space:nowrap}
-/* id · вопрос · cus, packed to the left. Only the question may shrink — the id and the
-   customer code are what you scan for, so they never get cut. */
+/* id · вопрос · cus · ФИО, packed to the left. The descriptive text may shrink — the id
+   and customer code are what you scan for, so they never get cut. */
 .tab .tmid{display:flex;align-items:baseline;gap:7px;min-width:0}
 .tab .tid{flex:none;white-space:nowrap}
 .tab .tq{flex:0 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .tab .tcus{flex:none;white-space:nowrap}
+.tab .tfio{flex:0 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 
 /* ---------- dossier ---------- */
 .dossier{margin-top:26px}
@@ -429,9 +430,20 @@ body{background:var(--ground);letter-spacing:.01em}
 .reset.save:hover{background:#0A47B0;border-color:#0A47B0;color:#fff}
 
 .tabs{gap:3px;margin-top:24px;border:0}
+.tabs-head{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:6px}
 .tabs-label{
-  margin-bottom:6px;
   color:var(--navy);font-size:11px;font-weight:600;letter-spacing:.1em;
+}
+.traceids-dl{
+  display:inline-flex;align-items:center;gap:6px;
+  font:500 11px var(--sans);color:var(--navy);background:transparent;
+  border:0;border-radius:8px;padding:5px 8px;cursor:pointer;
+}
+.traceids-dl:hover{background:var(--paper-2)}
+.traceids-dl:disabled{color:var(--muted);cursor:default;background:transparent}
+.traceids-dl .count{
+  min-width:18px;height:18px;display:inline-grid;place-items:center;
+  padding:0 5px;border-radius:9px;background:var(--paper-2);font:600 10px var(--mono);
 }
 .tab{
   border:0;border-radius:10px;padding:9px 14px;background:transparent;
@@ -442,7 +454,8 @@ body{background:var(--ground);letter-spacing:.01em}
 .tab .tnum{font-size:11.5px}
 .tab .tq{font-family:var(--sans);font-size:12.5px}
 .tab .tcus{font-family:var(--mono);font-size:11.5px;color:var(--muted)}
-.tab[aria-selected="true"] .tcus{color:#0B57D0}
+.tab .tfio{font-family:var(--sans);font-size:12px;color:var(--muted)}
+.tab[aria-selected="true"] .tcus,.tab[aria-selected="true"] .tfio{color:#0B57D0}
 .tab:hover{background:var(--paper)}
 .tabrow{border-radius:10px;gap:0}
 .tabrow.on{background:#D3E3FD;outline:0}
@@ -627,7 +640,7 @@ table.raw tr:hover td{background:#F1F5FB}
   border-color:#F2B8B5;border-radius:12px;background:#FCE8E6;padding:13px 16px;
 }
 
-.drop:focus-visible,.reset:focus-visible,.tab:focus-visible,details.pay>summary:focus-visible{
+.drop:focus-visible,.reset:focus-visible,.tab:focus-visible,.traceids-dl:focus-visible,details.pay>summary:focus-visible{
   outline:3px solid #AECBFA;outline-offset:2px;
 }
 
@@ -2269,32 +2282,61 @@ function exportTrace(i){
                'trace_' + slug + '_' + tstamp() + '.json');
 }
 
+function uniqueTraceIds(traces){
+  const ids = [], seen = new Set();
+  (traces || []).forEach(t => {
+    const id = String(t && t.traceId != null ? t.traceId : '').trim();
+    if(!id || id === NO_TRACE || id === 'null' || id === '(empty)' || id === '-') return;
+    // Hex trace ids are case-insensitive; preserve the spelling of the first occurrence
+    // while still treating an upper-case copy as the same id.
+    const key = /^[0-9a-f]{32}$/i.test(id) ? id.toLowerCase() : id;
+    if(seen.has(key)) return;
+    seen.add(key); ids.push(id);
+  });
+  return ids;
+}
+
+function exportUniqueTraceIds(){
+  const ids = uniqueTraceIds(STATE.traces);
+  if(!ids.length) return;
+  downloadBlob(ids.join('\n') + '\n', 'text/plain;charset=utf-8',
+               'traceids_unique_' + tstamp() + '.txt');
+}
+
 const DL_ICON = '<svg viewBox="0 0 16 16" width="13" height="13" aria-hidden="true">' +
   '<path d="M8 1.8v7.4M4.7 6.2 8 9.5l3.3-3.3M2.6 13.2h10.8" fill="none" stroke="currentColor" ' +
   'stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>';
 
 /* A traceId identifies a row but does not describe it. What tells the rows apart at a
-   glance is what was asked and by whom, so each one reads "<id> - <вопрос> - <cus>";
-   whichever of the two is missing from the dump is simply left out. */
+   glance is what was asked and by whom, so each one reads
+   "<id> - <вопрос> - <cus> - <ФИО>"; missing parts are simply left out. */
 function tabLabel(t){
   const ctx = t.meta.ctx || {};
   const q = (t.userQ && t.userQ.text ? String(t.userQ.text) : '').replace(/\s+/g, ' ').trim();
   const cus = (t.userQ && t.userQ.cus) || ctx.cus || '';
+  const fio = [ctx.lastName, ctx.firstName, ctx.middleName].filter(Boolean).join(' ').trim()
+              || String(ctx.nickname || '').trim();
   return {
     id: t.traceId,
     q: q.length > 200 ? q.slice(0, 200) + '…' : q,
-    cus: String(cus || '').trim()
+    cus: String(cus || '').trim(),
+    fio: fio
   };
 }
 
 function renderTabs(){
   const tabs = $('#tabs');
-  if(STATE.traces.length <= 1){ tabs.classList.add('hidden'); tabs.innerHTML = ''; return; }
+  if(!STATE.traces.length){ tabs.classList.add('hidden'); tabs.innerHTML = ''; return; }
   tabs.classList.remove('hidden');
-  tabs.innerHTML = '<span class="tabs-label">TRACEID</span>' +
+  const traceIds = uniqueTraceIds(STATE.traces);
+  tabs.innerHTML = '<div class="tabs-head"><span class="tabs-label">TRACEID</span>' +
+    '<button class="traceids-dl" id="traceidsdl" type="button"' + (traceIds.length ? '' : ' disabled') +
+    ' title="Выгрузить уникальные traceId (' + traceIds.length + ')"' +
+    ' aria-label="Выгрузить уникальные traceId">' + DL_ICON +
+    '<span>Выгрузить уникальные traceId</span><span class="count">' + traceIds.length + '</span></button></div>' +
     STATE.traces.map((t, i) => {
     const l = tabLabel(t);
-    const full = [l.id, l.q, l.cus].filter(Boolean).join(' - ');
+    const full = [l.id, l.q, l.cus, l.fio].filter(Boolean).join(' - ');
     // the row is a pair of siblings, not nested buttons: the tab selects the trace,
     // the trailing one downloads it
     return '<div class="tabrow' + (i === STATE.active ? ' on' : '') + '">' +
@@ -2304,6 +2346,7 @@ function renderTabs(){
       '<span class="tid">' + esc(l.id) + '</span>' +
       (l.q ? '<span class="tq">- ' + esc(l.q) + '</span>' : '') +
       (l.cus ? '<span class="tcus">- ' + esc(l.cus) + '</span>' : '') +
+      (l.fio ? '<span class="tfio">- ' + esc(l.fio) + '</span>' : '') +
     '</span>' +
     '<span class="tnum">' + t.stats.records + ' зап.</span></button>' +
     '<button class="tabdl" data-i="' + i + '" title="Выгрузить логи этого traceId в JSON (' +
@@ -2316,6 +2359,8 @@ function renderTabs(){
   tabs.querySelectorAll('.tabdl').forEach(b => b.onclick = e => {
     e.stopPropagation(); exportTrace(+b.dataset.i);
   });
+  const traceIdsDl = tabs.querySelector('#traceidsdl');
+  if(traceIdsDl) traceIdsDl.onclick = exportUniqueTraceIds;
 }
 
 /* start of a trace, for the chronologically ordered tab strip. Dumps routinely span
