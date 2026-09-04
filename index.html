@@ -750,7 +750,8 @@ function liftRecord(l){
   if(!l || typeof l !== 'object') return l;
   // the overwhelming majority of records are already flat — leave them untouched rather
   // than shallow-copying every one of tens of thousands of 200-key objects
-  if(l.traceId && l.app_id && l['envoy.message'] == null && l['envoy.method'] == null) return l;
+  if(l.traceId && l.app_id && l.message != null &&
+     l['envoy.message'] == null && l['envoy.method'] == null && l.method == null) return l;
   const val = v => (v == null || v === '' || v === 'null') ? null : v;
   const pick = function(){
     for(let i = 0; i < arguments.length; i++){ const v = val(l[arguments[i]]); if(v != null) return v; }
@@ -778,13 +779,24 @@ function liftRecord(l){
   }
   const from = k => env ? val(env[k]) : null;
 
-  const traceId = pick('traceId', 'envoy.traceId', 'envoy.trace_id') || from('traceId') || from('trace_id');
+  // Some python services write snake_case fields directly at the top level. Flat
+  // service-mesh access logs may carry the same trace in request_id instead; only use
+  // that value when it has the exact 32-hex trace-id shape so ordinary request UUIDs do
+  // not accidentally merge unrelated records.
+  const flatAccess = (!hasEnvoyMsg && !env && val(l.method) != null && val(l.path) != null);
+  const requestTrace = flatAccess && /^[0-9a-f]{32}$/i.test(String(val(l.request_id) || ''))
+    ? val(l.request_id) : null;
+  const traceId = pick('traceId', 'trace_id', 'envoy.traceId', 'envoy.trace_id') ||
+                  from('traceId') || from('trace_id') || requestTrace;
   const appId = pick('app_id', 'resource.service_name', 'resource.k8s_container_name', 'envoy.service');
   // an istio access log has no message of its own — state the hop it recorded
-  const access = (!hasEnvoyMsg && !env && val(l['envoy.method']))
-    ? val(l['envoy.method']) + ' ' + (val(l['envoy.path']) || '') +
-      ' -> ' + (val(l['envoy.response_code']) || '?') +
-      (val(l['envoy.duration']) != null ? ' | ' + l['envoy.duration'] + ' мс' : '')
+  const accessMethod = (!hasEnvoyMsg && !env) ? pick('envoy.method', 'method') : null;
+  const accessPath = pick('envoy.path', 'path') || '';
+  const accessCode = pick('envoy.response_code', 'response_code');
+  const accessDuration = pick('envoy.duration', 'duration');
+  const access = accessMethod
+    ? accessMethod + ' ' + accessPath + ' -> ' + (accessCode || '?') +
+      (accessDuration != null ? ' | ' + accessDuration + ' мс' : '')
     : null;
   // caddy writes its access log as JSON with `msg` instead of `message`, and the useful
   // part is the request it handled, not the constant "handled request" it always says
@@ -806,7 +818,7 @@ function liftRecord(l){
   // real line escaped inside it. Every extractor below reads `message`, so the lifted
   // copy has to replace it rather than politely stand aside.
   if(message != null) out.message = message;
-  put('spanId', pick('envoy.spanId', 'envoy.span_id') || from('spanId') || from('span_id'));
+  put('spanId', pick('spanId', 'span_id', 'envoy.spanId', 'envoy.span_id') || from('spanId') || from('span_id'));
   put('logger', pick('envoy.logger', 'logger_name') || from('logger'));
   put('exception', pick('envoy.exception') || from('exception'));
   put('pod_name', pick('resource.k8s_pod_name'));
@@ -817,7 +829,7 @@ function liftRecord(l){
   // an access log has no level of its own — take it from the status it recorded, so a
   // failing hop in the mesh still reaches the errors section
   if(lvl == null && access != null){
-    const code = +val(l['envoy.response_code']);
+    const code = +accessCode;
     lvl = code >= 500 ? 'ERROR' : code >= 400 ? 'WARN' : 'INFO';
   }
   if(lvl != null) out.level = String(lvl).toUpperCase();
