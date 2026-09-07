@@ -262,6 +262,7 @@ details.section>summary.section-head:focus-visible h2{color:var(--navy)}
 .c-ans{color:#fff;border-color:var(--ink);background:var(--ink)}
 .c-err{color:#fff;border-color:var(--crimson);background:var(--crimson)}
 .c-sys{color:var(--muted);border-color:var(--rule)}
+.c-core{color:var(--amber);border-color:var(--amber);background:#fdf6e8}
 
 .title{font-size:14.5px;font-weight:600;display:inline}
 .title .name{font-family:var(--mono);font-size:13.5px;font-weight:600}
@@ -328,6 +329,7 @@ pre.json{
 .bar.k-rag span{background:var(--forest)}
 .bar.k-llm span{background:var(--violet)}
 .bar.k-sub span{background:var(--navy)}
+.bar.k-core span{background:var(--amber)}
 .dur{font-family:var(--mono);font-size:10.5px;color:var(--muted);margin-top:4px;text-align:right}
 
 /* ---------- tool inventory ---------- */
@@ -530,6 +532,7 @@ body{background:var(--ground);letter-spacing:.01em}
   border-radius:10px;padding:2px 7px;font-size:9px;letter-spacing:.08em;
 }
 .c-mcp{background:#FCE8E6}
+.c-core{background:#FEF7E0}
 .c-ans{border-color:var(--navy);background:var(--navy)}
 .c-err{background:var(--crimson)}
 .title{font-size:14px}
@@ -693,6 +696,10 @@ table.raw tr:hover td{background:#F1F5FB}
 <script>
 // ==== PARSER:START ====
 const MONTHS = {Jan:0,Feb:1,Mar:2,Apr:3,May:4,Jun:5,Jul:6,Aug:7,Sep:8,Oct:9,Nov:10,Dec:11};
+/* Core services write Moscow wall clock into `time`, while the Kibana they are
+   exported from renders @timestamp in whatever timezone the analyst's session had —
+   the two dumps then disagree by hours. See liftRecord. */
+const CORE_TZ = '+03:00';
 
 function parseKibanaTs(s){
   if(!s) return null;
@@ -799,9 +806,19 @@ function liftRecord(l){
   const flatAccess = (!hasEnvoyMsg && !env && val(l.method) != null && val(l.path) != null);
   const requestTrace = flatAccess && /^[0-9a-f]{32}$/i.test(String(val(l.request_id) || ''))
     ? val(l.request_id) : null;
+
+  // The core services the MCP server calls out to sit in a different Kibana and write a
+  // .NET-shaped record that shares no field with the flat one: the service is in
+  // appName, the logger in category, and the trace only at the tail of userCode —
+  // invest_aiagent_<клиент>_<traceId>. Unlifted, the whole core dump lands in the "(нет
+  // traceId)" bucket as unattributed noise.
+  const coreApp = (!hasEnvoyMsg && !env && val(l.category)) ? pick('appName', 'systemCode') : null;
+  const coreTrace = coreApp
+    ? (/([0-9a-f]{32})$/i.exec(String(pick('userCode', 'X-External-User-Code') || '')) || [])[1] || null
+    : null;
   const traceId = pick('traceId', 'trace_id', 'envoy.traceId', 'envoy.trace_id') ||
-                  from('traceId') || from('trace_id') || requestTrace;
-  const appId = pick('app_id', 'resource.service_name', 'resource.k8s_container_name', 'envoy.service');
+                  from('traceId') || from('trace_id') || requestTrace || coreTrace;
+  const appId = pick('app_id', 'resource.service_name', 'resource.k8s_container_name', 'envoy.service') || coreApp;
   // an istio access log has no message of its own — state the hop it recorded
   const accessMethod = (!hasEnvoyMsg && !env) ? pick('envoy.method', 'method') : null;
   const accessPath = pick('envoy.path', 'path') || '';
@@ -832,9 +849,9 @@ function liftRecord(l){
   // copy has to replace it rather than politely stand aside.
   if(message != null) out.message = message;
   put('spanId', pick('spanId', 'span_id', 'envoy.spanId', 'envoy.span_id') || from('spanId') || from('span_id'));
-  put('logger', pick('envoy.logger', 'logger_name') || from('logger'));
+  put('logger', pick('envoy.logger', 'logger_name') || from('logger') || (coreApp ? val(l.category) : null));
   put('exception', pick('envoy.exception') || from('exception'));
-  put('pod_name', pick('resource.k8s_pod_name'));
+  put('pod_name', pick('resource.k8s_pod_name') || (coreApp ? val(l.host) : null));
   put('namespace', pick('resource.k8s_namespace_name'));
   put('app_version', pick('resource.service_version'));
   // python lowercases its levels; the raw-log filter lists them verbatim, so one casing
@@ -846,6 +863,13 @@ function liftRecord(l){
     lvl = code >= 500 ? 'ERROR' : code >= 400 ? 'WARN' : 'INFO';
   }
   if(lvl != null) out.level = String(lvl).toUpperCase();
+  // A core record is dated twice: @timestamp as its Kibana chose to render it, and `time`
+  // as the service itself wrote it. Only the second is a fixed point — take it, or the
+  // hop lands hours away from the tool call it served.
+  if(coreApp){
+    const t = /^(\d{4}-\d{2}-\d{2})[ T](\d{2}:\d{2}:\d{2})(?:\.(\d+))?/.exec(String(val(l.time) || ''));
+    if(t) out['@timestamp'] = t[1] + 'T' + t[2] + '.' + ((t[3] || '') + '000').slice(0, 3) + CORE_TZ;
+  }
   return out;
 }
 
@@ -1137,6 +1161,25 @@ function extractMcp(msg){
   out.isCall = !!(out.result || (out.method === 'tool/call'));
   out.isHandshake = !out.tool && !!out.method;
   return out;
+}
+
+/* A record from a core service the MCP server called: the service in appName, the .NET
+   logger in category, the structured payload flattened into data.*, and one requestId
+   per incoming HTTP request — that id is what makes hundreds of TRACE lines one hop. */
+function coreRecord(l){
+  const svc = l.appName || l.systemCode;
+  if(!svc || !l.category) return null;
+  return {svc: String(svc), cat: String(l.category), req: l.requestId || null,
+          path: l['data.RequestPath'] || l['data.requestPath.Value'] || null};
+}
+
+/* .NET times things two ways: a TimeSpan ("00:00:00.0003768") and plain milliseconds */
+function spanMs(v){
+  if(v == null || v === '') return null;
+  const m = /^(\d+):(\d{2}):(\d{2}(?:\.\d+)?)$/.exec(String(v).trim());
+  if(m) return ((+m[1]) * 3600 + (+m[2]) * 60 + parseFloat(m[3])) * 1000;
+  const n = parseFloat(v);
+  return isNaN(n) ? null : n;
 }
 
 /* langflow: "[TOOL] | Request|Response | name | headers={...} | body=..." */
@@ -1435,6 +1478,8 @@ function summarize(evs, rcs, ctx){
   const mcpCalls = evs.filter(e => e.kind === 'mcp');
   const ragHits = evs.filter(e => e.kind === 'rag' && e.chunks != null);
   const subCalls = evs.filter(e => e.kind === 'subagent' && e.phase === 'in');
+  const coreCalls = evs.filter(e => e.kind === 'core');
+  const coreDetailed = coreCalls.filter(e => e.detailed);
   const calledSubs = Array.from(new Set(subCalls.map(e => e.name)));
   const calledMcp = Array.from(new Set(mcpCalls.map(e => e.name)));
   const plan = ctx.plan, allAvailable = ctx.allAvailable || [];
@@ -1455,6 +1500,18 @@ function summarize(evs, rcs, ctx){
     if(missed.length){
       findings.push({level: 'warn', text: 'Планировщик назначил ' + planned.map(t => '<code>' + t + '</code>').join(', ') +
         ', но так и не вызваны: ' + missed.map(t => '<code>' + t + '</code>').join(', ') + '.'});
+    }
+  }
+  if(coreCalls.length){
+    const svcList = ns => Array.from(new Set(ns.map(e => e.name))).map(s => '<code>' + s + '</code>').join(', ');
+    if(coreDetailed.length){
+      findings.push({level: 'ok', text: 'Обращений MCP в core-сервисы: <b>' + coreCalls.length +
+        '</b>, из них с логами самих сервисов — <b>' + coreDetailed.length + '</b> (' + svcList(coreDetailed) + ').'});
+    } else {
+      // the analyst is one Kibana query away from seeing the other half of every call
+      findings.push({level: 'note', text: 'MCP ходил в core-сервисы (' + svcList(coreCalls) +
+        '), но их собственных логов в выгрузке нет' +
+        (ctx.userCode ? ' — выгрузите их из ELK core по <code>userCode: "' + ctx.userCode + '"</code>' : '') + '.'});
     }
   }
   if(ragHits.length){
@@ -1483,6 +1540,7 @@ function summarize(evs, rcs, ctx){
     stats: {
       records: rcs.length,
       mcp: mcpCalls.length,
+      core: coreCalls.length,
       rag: ragHits.reduce((a, e) => a + e.chunks, 0),
       llm: evs.filter(e => e.kind === 'llm').length,
       subs: subCalls.length,
@@ -1753,6 +1811,148 @@ function buildOne(traceId, recs){
     }
   });
 
+  // ---- core services behind the MCP calls ------------------------------------------
+  // The adapter logs the hop it makes (upstream_request: service + endpoint) and nothing
+  // about what happened on the other side. When the core service's own dump is loaded
+  // too, the hundreds of TRACE lines it writes per request fold into a single row —
+  // status, time, the stored procedures and the HTTP calls it made — hung under the tool
+  // call it served. A hop whose service dump is missing still gets a muted row: it names
+  // where the tool went, which is the first thing to ask when a tool comes back empty.
+  const CORE_SLACK = 300;   // the two dumps are two clocks; let them disagree a little
+  const toolWindows = events.filter(e => e.kind === 'mcp' && e.name)
+    .map(e => ({name: e.name, start: e.ts - (e.ms || 0), end: e.ts}));
+  // The tightest window that holds the whole core request. Tools run in parallel and
+  // their windows nest, so a request that outlives a candidate tool belongs to the longer
+  // call running alongside it, never to that one.
+  const hostToolOf = (start, end) => {
+    let best = null;
+    const fit = (a, b) => toolWindows.forEach(w => {
+      if(a < w.start - CORE_SLACK || b > w.end + CORE_SLACK) return;
+      if(!best || (w.end - w.start) < (best.end - best.start)) best = w;
+    });
+    fit(start, end);
+    if(!best) fit(start, start);   // the tool's own record never made it into the dump
+    return best ? best.name : null;
+  };
+
+  const bucket = (m, k) => { let v = m.get(k); if(!v){ v = {n: 0, done: 0, ms: 0}; m.set(k, v); } return v; };
+  const coreReqs = new Map();
+  recs.forEach(r => {
+    const c = coreRecord(r.raw);
+    if(!c) return;
+    const key = c.req || (c.svc + '|' + (c.path || ''));
+    let g = coreReqs.get(key);
+    if(!g){
+      g = {svc: c.svc, path: c.path, start: r.ts, end: r.ts, n: 0, method: null, status: null,
+           ms: null, query: null, llm: 0, err: 0, levels: {},
+           sp: new Map(), cmd: new Map(), http: new Map()};
+      coreReqs.set(key, g);
+    }
+    const raw = r.raw, lvl = String(r.level || '').toUpperCase();
+    g.n++;
+    if(r.ts < g.start) g.start = r.ts;
+    if(r.ts > g.end) g.end = r.ts;
+    if(!g.path && c.path) g.path = c.path;
+    g.levels[lvl] = (g.levels[lvl] || 0) + 1;
+    if(lvl === 'ERROR' || lvl === 'FATAL' || lvl.lastIndexOf('WARN', 0) === 0) g.err++;
+    // the middleware line closes the request and states how it went
+    if(/RequestStatusLoggingMiddleware$/.test(c.cat)){
+      g.method = raw['data.httpMethod'] || g.method;
+      g.status = raw['data.statusCode'] || raw['data.StatusCode'] || g.status;
+      const took = spanMs(raw['data.elapsed']);
+      if(took != null) g.ms = took;
+    }
+    // a db command is logged twice — the text about to run, then the time it took. Count
+    // the second; the first is the fallback for a request the dump cuts in half.
+    const sp = raw.spName || raw['data.storedProcedureName'];
+    if(sp){
+      const v = bucket(g.sp, sp), took = spanMs(raw['data.elapsed']);
+      v.n++;
+      if(took != null){ v.done++; v.ms += took; }
+    }
+    const cmd = raw['data.commandName'];
+    if(cmd){
+      const v = bucket(g.cmd, cmd), took = spanMs(raw['data.elapsedMs'] || raw['data.elapsed']);
+      v.n++;
+      if(took != null){ v.done++; v.ms += took; }
+    }
+    // an outgoing call is logged twice too — absolute url first, then relative; the
+    // absolute form is the one worth counting
+    const out = /^Запрос\s+([A-Z]+)\s+(https?:\/\/\S+)/.exec(r.msg);
+    if(out) bucket(g.http, out[1] + ' ' + out[2].split('?')[0]).n++;
+    if(/LlmClient$/.test(c.cat) && r.msg.indexOf('получен ответ') >= 0) g.llm++;
+    if(!g.query && raw['data.query']) g.query = String(raw['data.query']);
+  });
+
+  const hops = recs.filter(r => r.raw.event === 'upstream_request')
+    .map(r => ({ts: r.ts, svc: r.raw.service || r.raw['X-External-System-Code'] || '',
+                ep: r.raw.endpoint || '', method: r.raw.http_method || '', taken: false}))
+    .filter(h => h.svc);
+  const coreList = Array.from(coreReqs.values()).sort((a, b) => a.start - b.start);
+  // pair a request with the hop that started it: same service and endpoint, the latest
+  // one that fired before the service wrote its first line
+  coreList.forEach(g => {
+    let best = null;
+    hops.forEach(h => {
+      if(h.taken || h.svc !== g.svc) return;
+      if(g.path && h.ep && h.ep !== g.path) return;
+      if(h.ts > g.start + 500 || h.ts < g.start - 30000) return;
+      if(!best || h.ts > best.ts) best = h;
+    });
+    if(best){ best.taken = true; g.method = g.method || best.method; }
+  });
+
+  const listOf = m => Array.from(m.entries())
+    .map(p => ({name: p[0], n: p[1].done || p[1].n, ms: p[1].ms}))
+    .sort((a, b) => b.n - a.n || a.name.localeCompare(b.name))
+    .map(x => x.name + (x.n > 1 ? ' ×' + x.n : '') + (x.ms ? ' · ' + Math.round(x.ms) + ' мс' : ''))
+    .join('\n  ');
+  const totalOf = m => Array.from(m.values()).reduce((a, v) => a + (v.done || v.n), 0);
+
+  coreList.forEach(g => {
+    const took = g.ms != null ? g.ms : (g.end - g.start);
+    const spN = totalOf(g.sp), httpN = totalOf(g.http);
+    const bits = [];
+    if(g.path) bits.push((g.method || 'HTTP') + ' ' + g.path + (g.status ? ' → ' + g.status : ''));
+    bits.push(took >= 1000 ? (took / 1000).toFixed(2) + ' с' : Math.round(took) + ' мс');
+    if(spN) bits.push('процедур БД: ' + spN);
+    if(httpN) bits.push('HTTP-вызовов: ' + httpN);
+    if(g.llm) bits.push('обращений к LLM: ' + g.llm);
+    if(g.err) bits.push('ошибок: ' + g.err);
+    const detail = [];
+    if(g.query) detail.push('запрос: ' + g.query);
+    if(g.cmd.size) detail.push('команды:\n  ' + listOf(g.cmd));
+    if(g.sp.size) detail.push('процедуры БД:\n  ' + listOf(g.sp));
+    if(g.http.size) detail.push('HTTP-вызовы:\n  ' + listOf(g.http));
+    detail.push('записей в логе: ' + g.n + ' (' +
+      Object.keys(g.levels).map(k => k + ' ' + g.levels[k]).join(', ') + ')');
+    const failed = (+g.status >= 400) || g.err > 0;
+    const hostTool = hostToolOf(g.start, g.end);
+    events.push({ts: g.start, kind: 'core', depth: hostTool ? 3 : 2, chip: 'Core',
+                 chipClass: failed ? 'c-err' : 'c-core',
+                 title: 'Запрос в ', name: g.svc, app: g.svc, detailed: true,
+                 startTs: g.start, ms: took, under: hostTool,
+                 meta: bits.join(' · '), detail: detail.join('\n')});
+  });
+
+  // hops with no service dump behind them: one row per tool, service and endpoint
+  const thinHops = new Map();
+  hops.forEach(h => {
+    if(h.taken) return;
+    const under = hostToolOf(h.ts, h.ts);
+    const key = (under || '') + '|' + h.svc + '|' + h.ep;
+    let t = thinHops.get(key);
+    if(!t){ t = {ts: h.ts, svc: h.svc, ep: h.ep, method: h.method, under: under, n: 0}; thinHops.set(key, t); }
+    t.n++;
+    if(h.ts < t.ts) t.ts = h.ts;
+  });
+  thinHops.forEach(t => events.push({
+    ts: t.ts, kind: 'core', depth: t.under ? 3 : 2, chip: 'Core', chipClass: 'c-core', minor: true,
+    title: 'Запрос в ', name: t.svc, app: 'invest-alfadirect-mcp-server', under: t.under,
+    meta: (t.method || 'HTTP') + ' ' + t.ep + (t.n > 1 ? ' ×' + t.n : '') +
+          ' · логов сервиса в выгрузке нет'
+  }));
+
   // A call whose Response never reached these files has no known end. Left open it would
   // run to infinity and adopt the whole rest of the trace — the answer and the delivery
   // included — so give it no window at all instead of a guessed one.
@@ -1845,7 +2045,7 @@ function buildOne(traceId, recs){
   // nest by time containment: what happened inside a sub-agent belongs under it
   clean.forEach(e => {
     const host = spans.find(s => e.ts >= s.start && e.ts <= s.end);
-    if(host && e.kind !== 'subagent') e.under = host.name;
+    if(host && e.kind !== 'subagent' && !e.under) e.under = host.name;
     if(e.kind === 'llm') e.depth = host ? 2 : (e.calls ? 1 : 0);
   });
   clean.sort((a, b) => a.ts - b.ts || a.depth - b.depth);
@@ -1889,7 +2089,7 @@ function buildOne(traceId, recs){
 
   // the real conversation ends at the last meaningful event; stray stream-close
   // warnings minutes later must not stretch the scale
-  const STORY = {user: 1, llm: 1, subagent: 1, mcp: 1, mcpwrap: 1, rag: 1, answer: 1};
+  const STORY = {user: 1, llm: 1, subagent: 1, mcp: 1, mcpwrap: 1, rag: 1, answer: 1, core: 1};
   const storyEvents = clean.filter(e => STORY[e.kind]);
   const tEnd = storyEvents.length ? storyEvents[storyEvents.length - 1].ts : t1;
   meta.durationMs = Math.max(tEnd - t0, 1);
@@ -2050,8 +2250,12 @@ function buildOne(traceId, recs){
     for(let i = 0; i < userQs.length; i++){ if(ts >= userQs[i].ts) idx = i; else break; }
     return idx;
   };
+  // the core dump is filtered by this code, not by traceId — name it in the findings
+  const userCodeRec = recs.find(r => r.raw['X-External-User-Code'] || r.raw.userCode);
+  const userCode = userCodeRec ? (userCodeRec.raw['X-External-User-Code'] || userCodeRec.raw.userCode) : null;
   const agg = summarize(clean, recs, {userQ: userQ, plan: plan, finalAnswer: finalAnswer,
-    delivered: delivered, allAvailable: allAvailable, errs: errs, seconds: meta.durationMs / 1000});
+    delivered: delivered, allAvailable: allAvailable, errs: errs, userCode: userCode,
+    seconds: meta.durationMs / 1000});
 
   const segments = userQs.map((q, i) => {
     const segEvents = clean.filter(e => segOf(e.ts) === i);
@@ -2066,7 +2270,7 @@ function buildOne(traceId, recs){
     const segEnd = segEvents.length ? segEvents[segEvents.length - 1].ts : q.ts;
     const view = summarize(segEvents, segRecs, {userQ: q, plan: planEv ? planEv.planData : null,
       finalAnswer: segAnswer, delivered: segDelivered, allAvailable: allAvailable,
-      errs: segErrs, seconds: Math.max((segEnd - q.ts) / 1000, 0)});
+      errs: segErrs, userCode: userCode, seconds: Math.max((segEnd - q.ts) / 1000, 0)});
     return {index: i, question: q, findings: view.findings, stats: view.stats,
             finalAnswer: segAnswer, answerParts: segParts, delivered: segDelivered};
   });
@@ -2433,6 +2637,7 @@ function renderReport(){
     ['ходов LLM', st.llm, ''],
     ['саб-агентов', st.subs, ''],
     ['вызовов MCP', st.mcp, st.mcp === 0 ? 'hl' : ''],
+    ['ходов в core', st.core || 0, ''],
     ['чанков RAG', st.rag, ''],
     ['секунд', st.seconds.toFixed(1), '']
   ].map(s => '<div class="stat ' + s[2] + '"><div class="v">' + esc(s[1]) + '</div><div class="k">' + esc(s[0]) + '</div></div>').join('') + '</div>';
@@ -2474,7 +2679,7 @@ function renderReport(){
       const left = Math.max(0, Math.min(100, st / total * 100));
       const w = Math.max(1.2, Math.min(100 - left, dur / total * 100));
       const k = (e.kind === 'mcp' || e.kind === 'mcpwrap') ? 'k-mcp' : e.kind === 'rag' ? 'k-rag' :
-                e.kind === 'llm' ? 'k-llm' : 'k-sub';
+                e.kind === 'llm' ? 'k-llm' : e.kind === 'core' ? 'k-core' : 'k-sub';
       return '<div class="bar ' + k + '"><span style="left:' + left.toFixed(2) + '%;width:' + w.toFixed(2) + '%"></span></div>' +
              (e.ms != null ? '<div class="dur">' + esc(fmtMs(e.ms)) + '</div>' : '');
     })();
@@ -2490,6 +2695,7 @@ function renderReport(){
     if(e.params) inner += payloadBlock('параметры запроса', e.params);
     if(e.result) inner += payloadBlock('ответ инструмента', e.result);
     if(e.payload) inner += payloadBlock('полезная нагрузка', e.payload);
+    if(e.detail) inner += payloadBlock('что делал сервис', e.detail);
 
     const sp = evSpan(e);
     const hasEnd = sp.end != null && sp.end > sp.start;
