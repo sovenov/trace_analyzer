@@ -547,6 +547,8 @@ details.pay>summary{
   border-color:var(--rule);border-radius:8px;padding:4px 9px;background:var(--paper-2);
 }
 details.pay>summary:hover{border-color:#AECBFA;background:#F5F8FF}
+details.pay.err>summary{color:var(--crimson);border-color:#F2B8B5;background:#FFF8F7}
+details.pay.err>summary:hover{border-color:var(--crimson);background:#FFF1F0}
 .foldbtn{border-radius:8px;padding:4px 10px}
 .foldbtn:hover{border-color:#AECBFA;background:#F5F8FF}
 pre.json{
@@ -1173,6 +1175,14 @@ function extractMcp(msg){
   if(ad) out.upstreamMs = +ad[1];
   const st = /HTTP_STATUS:\s*(\d+)/.exec(msg);
   if(st) out.status = +st[1];
+  // a failed call has no RESULT at all — what it has instead is the verdict
+  const code = /(?:^|,\s*)CODE:\s*([A-Z_]+)/.exec(msg);
+  if(code) out.code = code[1];
+  const sc = /STATUS_CODE:\s*(\d+)/.exec(msg);
+  if(sc) out.statusCode = +sc[1];
+  const rtr = /RETRYABLE:\s*(\w+)/.exec(msg);
+  if(rtr) out.retryable = rtr[1];
+  out.failed = !!(out.code || out.statusCode >= 400);
 
   out.isCall = !!(out.result || (out.method === 'tool/call'));
   out.isHandshake = !out.tool && !!out.method;
@@ -1871,10 +1881,13 @@ function buildOne(traceId, recs){
         } else if(sp){
           sp.end = r.ts; sp.open = false;
         }
-        events.push({ts: r.ts, kind: 'subagent', phase: 'out', depth: 1, chip: 'Саб-агент', chipClass: 'c-sub',
+        const saFailed = /error|fail/i.test(String(sa.status || ''));
+        events.push({ts: r.ts, kind: 'subagent', phase: 'out', depth: 1, chip: 'Саб-агент',
+                     chipClass: saFailed ? 'c-err' : 'c-sub',
                      title: 'Ответ ', name: sa.name, app: app, ms: sa.ms,
                      startTs: sa.startTs != null ? sa.startTs : (sp ? sp.start : null),
-                     meta: 'статус: ' + (sa.status || '—'), payload: sa.body,
+                     meta: 'статус: ' + (sa.status || '—'),
+                     payload: saFailed ? null : sa.body, error: saFailed ? sa.body : null,
                      dedupeKey: 'sub-res:' + sa.name + ':' + sa.runId});
       }
     }
@@ -1883,7 +1896,19 @@ function buildOne(traceId, recs){
     if(app.indexOf('mcp-server') >= 0 || msg.indexOf('MCP_METHOD') >= 0){
       const mc = extractMcp(msg);
       if(mc){
-        if(mc.isCall && mc.result){
+        // Until now a tool that failed left no row at all: the adapter writes RESULT only
+        // on success, and every branch below wanted one. The row that says nothing came
+        // back is the one worth having.
+        if(mc.failed && mc.tool){
+          events.push({ts: r.ts, kind: 'mcp', depth: 2, chip: 'MCP', chipClass: 'c-err',
+                       title: 'Инструмент ', name: mc.tool, app: app, ms: mc.ms,
+                       status: mc.statusCode, params: mc.params, error: msg,
+                       meta: ['вызов не удался', mc.code,
+                              mc.statusCode ? 'HTTP ' + mc.statusCode : null,
+                              mc.retryable ? 'повтор возможен: ' + mc.retryable : null,
+                              mc.ms != null ? Math.round(mc.ms) + ' мс' : null].filter(Boolean).join(' · '),
+                       dedupeKey: 'mcpfail:' + mc.tool + ':' + r.ts});
+        } else if(mc.isCall && mc.result){
           events.push({ts: r.ts, kind: 'mcp', depth: 2, chip: 'MCP', chipClass: 'c-mcp',
                        title: 'Инструмент ', name: mc.tool, app: app,
                        ms: mc.ms, upstreamMs: mc.upstreamMs, status: mc.status,
@@ -1910,10 +1935,13 @@ function buildOne(traceId, recs){
         const q = mcpHttpPending.get(mh.name);
         const req = (q && q.length) ? q.shift() : null;
         const ms = req ? (r.ts - req.ts) : null;
-        httpCalls.push({ts: r.ts, kind: 'mcpwrap', phase: 'in', depth: 2, chip: 'MCP', chipClass: 'c-mcp',
+        httpCalls.push({ts: r.ts, kind: 'mcpwrap', phase: 'in', depth: 2, chip: 'MCP',
+                        chipClass: mh.isError ? 'c-err' : 'c-mcp',
                         title: 'Инструмент ', name: mh.name, app: app,
                         startTs: req ? req.ts : r.ts, ms: ms,
-                        params: req ? req.args : null, result: mh.result,
+                        params: req ? req.args : null,
+                        result: mh.isError ? null : mh.result,
+                        error: mh.isError ? mh.result : null,
                         meta: [ms != null ? Math.round(ms) + ' мс' : null,
                                req ? argPreview(req.args) : null,
                                'через MCP-шлюз',
@@ -1994,6 +2022,15 @@ function buildOne(traceId, recs){
   // queue keeper hands the message back and the orchestrator picks another. The agent's
   // own logs say nothing about any of this — it is all in the orchestrator's routing
   // lines, one fragment per line, so collect the fragments into the attempt they describe.
+  // langflow closes every run with a job line, and writes the reason next to it when the
+  // run failed. The queue keeper names that same job when it hands the message back, so
+  // the two meet and the reroute row can say what actually broke.
+  const alfiJobs = new Map();
+  const jobOf = id => {
+    let j = alfiJobs.get(id);
+    if(!j){ j = {id: id, ts: null, status: null, ms: null, flow: null, error: null, shown: false}; alfiJobs.set(id, j); }
+    return j;
+  };
   let att = null;
   const flushRoute = () => {
     if(att && (att.agent || att.final)){
@@ -2039,17 +2076,40 @@ function buildOne(traceId, recs){
       if(rt.kind === 'end'){ att.endTs = r.ts; flushRoute(); }
       return;
     }
+    const jf = /^\[ALFI\] Job finished \| job_id=([\w-]+) \| flow_id=([\w-]+) \| status=(\w+)(?: \| duration_ms=(\d+))?/.exec(r.msg);
+    if(jf){
+      const j = jobOf(jf[1]);
+      j.ts = r.ts; j.flow = jf[2]; j.status = jf[3]; j.ms = jf[4] ? +jf[4] : null;
+      return;
+    }
+    const je = /^Error during Alfi flow run for job_id ([\w-]+):\s*([\s\S]+)$/.exec(r.msg);
+    if(je){ jobOf(je[1]).error = je[2]; return; }
+
     // the queue keeper is the one that notices a flow answered with an error
     if(r.msg.lastIndexOf('AI Flow error will be rerouted by Orchestrator', 0) === 0){
       const fid = /agentError='([^']+)'/.exec(r.msg);
       const cnt = /rerouteCount='(\d+)'/.exec(r.msg);
+      const prev = /previousJobId='([^']+)'/.exec(r.msg);
+      const job = prev && alfiJobs.get(prev[1]);
+      if(job) job.shown = true;
       events.push({ts: r.ts, kind: 'route', depth: 0, chip: 'Роутер', chipClass: 'c-err',
                    title: 'Флоу вернул ошибку — запрос уходит в другой агент', app: r.app,
                    meta: [fid ? 'flow ' + fid[1] : null,
-                          cnt ? 'перемаршрутизация №' + cnt[1] : null].filter(Boolean).join(' · ')});
+                          job && job.ms != null ? 'флоу работал ' + Math.round(job.ms) + ' мс' : null,
+                          cnt ? 'перемаршрутизация №' + cnt[1] : null].filter(Boolean).join(' · '),
+                   error: job ? job.error : null});
     }
   });
   flushRoute();
+  // a run that died with nobody to hand the message on to still owes an explanation
+  alfiJobs.forEach(j => {
+    if(j.status !== 'failed' || j.shown || j.ts == null) return;
+    events.push({ts: j.ts, kind: 'route', depth: 0, chip: 'Флоу', chipClass: 'c-err',
+                 title: 'Флоу завершился ошибкой', app: 'alfagen-langflow',
+                 meta: [j.flow ? 'flow ' + j.flow : null,
+                        j.ms != null ? Math.round(j.ms) + ' мс' : null].filter(Boolean).join(' · '),
+                 error: j.error});
+  });
 
   // ---- core services behind the MCP calls ------------------------------------------
   // The adapter logs the hop it makes (upstream_request: service + endpoint) and nothing
@@ -2084,7 +2144,7 @@ function buildOne(traceId, recs){
     let g = coreReqs.get(key);
     if(!g){
       g = {svc: c.svc, path: c.path, start: r.ts, end: r.ts, n: 0, method: null, status: null,
-           ms: null, query: null, llm: 0, err: 0, levels: {},
+           ms: null, query: null, llm: 0, err: 0, errLines: [], levels: {},
            sp: new Map(), cmd: new Map(), http: new Map()};
       coreReqs.set(key, g);
     }
@@ -2094,7 +2154,10 @@ function buildOne(traceId, recs){
     if(r.ts > g.end) g.end = r.ts;
     if(!g.path && c.path) g.path = c.path;
     g.levels[lvl] = (g.levels[lvl] || 0) + 1;
-    if(lvl === 'ERROR' || lvl === 'FATAL' || lvl.lastIndexOf('WARN', 0) === 0) g.err++;
+    if(lvl === 'ERROR' || lvl === 'FATAL' || lvl.lastIndexOf('WARN', 0) === 0){
+      g.err++;
+      if(g.errLines.length < 6) g.errLines.push(lvl + ' ' + c.cat.split('.').pop() + ': ' + r.msg.slice(0, 400));
+    }
     // the middleware line closes the request and states how it went
     if(/RequestStatusLoggingMiddleware$/.test(c.cat)){
       g.method = raw['data.httpMethod'] || g.method;
@@ -2124,9 +2187,27 @@ function buildOne(traceId, recs){
     if(!g.query && raw['data.query']) g.query = String(raw['data.query']);
   });
 
-  const hops = recs.filter(r => r.raw.event === 'upstream_request')
+  // The adapter logs three kinds of hop: the call it made, a retry after a bad answer,
+  // and the failure it gave up on. The last two carry what the service actually said —
+  // the one thing worth reading when a tool comes back empty.
+  const HOP_EVENT = {upstream_request: 1, upstream_retry: 1, upstream_server_error: 1};
+  const upstreamBody = raw => {
+    const inline = firstJsonAfter(String(raw.message == null ? '' : raw.message), 'upstream_response_body:');
+    if(inline) return inline;
+    // the collector flattens the body into upstream_response_body.<field> columns
+    const flat = {};
+    Object.keys(raw).forEach(k => {
+      if(k.lastIndexOf('upstream_response_body.', 0) === 0) flat[k.slice(23)] = raw[k];
+    });
+    return Object.keys(flat).length ? JSON.stringify(flat, null, 2) : null;
+  };
+  const hops = recs.filter(r => HOP_EVENT[r.raw.event])
     .map(r => ({ts: r.ts, svc: r.raw.service || r.raw['X-External-System-Code'] || '',
-                ep: r.raw.endpoint || '', method: r.raw.http_method || '', taken: false}))
+                ep: r.raw.endpoint || '', method: r.raw.http_method || '', app: r.app,
+                taken: false, retry: r.raw.event === 'upstream_retry',
+                failed: r.raw.event !== 'upstream_request',
+                status: r.raw.upstream_status || null,
+                error: r.raw.event === 'upstream_request' ? null : upstreamBody(r.raw)}))
     .filter(h => h.svc);
   const coreList = Array.from(coreReqs.values()).sort((a, b) => a.start - b.start);
   // pair a request with the hop that started it: same service and endpoint, the latest
@@ -2139,7 +2220,11 @@ function buildOne(traceId, recs){
       if(h.ts > g.start + 500 || h.ts < g.start - 30000) return;
       if(!best || h.ts > best.ts) best = h;
     });
-    if(best){ best.taken = true; g.method = g.method || best.method; }
+    if(best){
+      best.taken = true;
+      g.method = g.method || best.method;
+      if(best.error){ g.hopError = best.error; g.hopStatus = best.status; }
+    }
   });
 
   const listOf = m => Array.from(m.entries())
@@ -2159,6 +2244,7 @@ function buildOne(traceId, recs){
     if(httpN) bits.push('HTTP-вызовов: ' + httpN);
     if(g.llm) bits.push('обращений к LLM: ' + g.llm);
     if(g.err) bits.push('ошибок: ' + g.err);
+    if(g.hopStatus) bits.push('апстрим вернул ' + g.hopStatus);
     const detail = [];
     if(g.query) detail.push('запрос: ' + g.query);
     if(g.cmd.size) detail.push('команды:\n  ' + listOf(g.cmd));
@@ -2166,13 +2252,15 @@ function buildOne(traceId, recs){
     if(g.http.size) detail.push('HTTP-вызовы:\n  ' + listOf(g.http));
     detail.push('записей в логе: ' + g.n + ' (' +
       Object.keys(g.levels).map(k => k + ' ' + g.levels[k]).join(', ') + ')');
-    const failed = (+g.status >= 400) || g.err > 0;
+    const failed = (+g.status >= 400) || g.err > 0 || !!g.hopError;
+    const errText = [g.hopError, g.errLines.join('\n')].filter(Boolean).join('\n\n');
     const hostTool = hostToolOf(g.start, g.end);
     events.push({ts: g.start, kind: 'core', depth: hostTool ? 3 : 2, chip: 'Core',
                  chipClass: failed ? 'c-err' : 'c-core',
                  title: 'Запрос в ', name: g.svc, app: g.svc, detailed: true,
                  startTs: g.start, ms: took, under: hostTool,
-                 meta: bits.join(' · '), detail: detail.join('\n')});
+                 meta: bits.join(' · '), detail: detail.join('\n'),
+                 error: errText || null});
   });
 
   // hops with no service dump behind them: one row per tool, service and endpoint
@@ -2182,15 +2270,26 @@ function buildOne(traceId, recs){
     const under = hostToolOf(h.ts, h.ts);
     const key = (under || '') + '|' + h.svc + '|' + h.ep;
     let t = thinHops.get(key);
-    if(!t){ t = {ts: h.ts, svc: h.svc, ep: h.ep, method: h.method, under: under, n: 0}; thinHops.set(key, t); }
-    t.n++;
+    if(!t){ t = {ts: h.ts, svc: h.svc, ep: h.ep, method: h.method, under: under,
+                 app: h.app, n: 0, retries: 0, failed: false, status: null, error: null};
+            thinHops.set(key, t); }
+    // a retry and the give-up line are the same call again, not new ones
+    if(h.retry) t.retries++;
+    else if(h.failed) t.failed = true;
+    else t.n++;
+    if(h.status) t.status = h.status;
+    if(h.error && !t.error) t.error = h.error;
     if(h.ts < t.ts) t.ts = h.ts;
   });
   thinHops.forEach(t => events.push({
-    ts: t.ts, kind: 'core', depth: t.under ? 3 : 2, chip: 'Core', chipClass: 'c-core', minor: true,
-    title: 'Запрос в ', name: t.svc, app: 'invest-alfadirect-mcp-server', under: t.under,
-    meta: (t.method || 'HTTP') + ' ' + t.ep + (t.n > 1 ? ' ×' + t.n : '') +
-          ' · логов сервиса в выгрузке нет'
+    ts: t.ts, kind: 'core', depth: t.under ? 3 : 2, chip: 'Core',
+    chipClass: t.failed ? 'c-err' : 'c-core', minor: !t.failed,
+    title: 'Запрос в ', name: t.svc, app: t.app || 'mcp', under: t.under,
+    meta: [(t.method || 'HTTP') + ' ' + t.ep + (t.n > 1 ? ' ×' + t.n : ''),
+           t.status ? 'ответ ' + t.status : null,
+           t.retries ? 'повторов: ' + t.retries : null,
+           t.failed ? 'сервис вернул ошибку' : 'логов сервиса в выгрузке нет'].filter(Boolean).join(' · '),
+    error: t.error
   }));
 
   // A call whose Response never reached these files has no known end. Left open it would
@@ -2269,13 +2368,22 @@ function buildOne(traceId, recs){
   // one MCP call surfaces twice: once as a LangFlow tool wrapper, once from the
   // adapter. Keep the adapter record (it carries params + result) and fold the
   // wrapper's round-trip time into it.
+  // One tool is often called several times over, so the wrapper belongs to the nearest
+  // adapter record, not the first one that shares its name — and it says its round trip
+  // once. Without both, one row collects every sibling's timing.
   const wrapped = new Set();
   clean.forEach(w => {
     if(w.kind !== 'mcpwrap') return;
-    const hit = clean.find(e => e.kind === 'mcp' && e.name === w.name && Math.abs(e.ts - w.ts) < 8000);
+    let hit = null;
+    clean.forEach(e => {
+      if(e.kind !== 'mcp' || e.name !== w.name) return;
+      const d = Math.abs(e.ts - w.ts);
+      if(d >= 8000 || (hit && d >= Math.abs(hit.ts - w.ts))) return;
+      hit = e;
+    });
     if(!hit) return;
     wrapped.add(w);
-    if(w.phase === 'out' && w.ms != null){
+    if(w.phase === 'out' && w.ms != null && hit.wrapMs == null){
       hit.wrapMs = w.ms;
       hit.meta = (hit.meta ? hit.meta + ' · ' : '') + 'через LangFlow ' + Math.round(w.ms) + ' мс';
     }
@@ -2840,9 +2948,10 @@ function pretty(txt){
   if(o) { try { return JSON.stringify(o, null, 2); } catch(e){} }
   return String(txt == null ? '' : txt);
 }
-function payloadBlock(label, txt){
+function payloadBlock(label, txt, cls){
   if(!txt) return '';
-  return '<details class="pay"><summary>' + esc(label) + '</summary><pre class="json">' + esc(pretty(txt)) + '</pre></details>';
+  return '<details class="pay' + (cls ? ' ' + cls : '') + '"><summary>' + esc(label) + '</summary>' +
+         '<pre class="json">' + esc(pretty(txt)) + '</pre></details>';
 }
 
 function renderReport(){
@@ -2934,6 +3043,7 @@ function renderReport(){
     if(e.usage && e.usage.total_tokens) inner += '<div class="meta">токены: ' + e.usage.prompt_tokens + ' → ' + e.usage.completion_tokens + '</div>';
     if(e.kind === 'answer' && e.parts) inner += answerBody(e.parts, e.quote);
     else if(e.quote) inner += '<div class="quote' + (e.full ? ' full' : '') + '">' + esc(e.quote) + '</div>';
+    if(e.error) inner += payloadBlock('ошибка', e.error, 'err');
     if(e.calls) inner += e.calls.map(c => payloadBlock('аргументы ' + c.name, c.args)).join('');
     if(e.params) inner += payloadBlock('параметры запроса', e.params);
     if(e.result) inner += payloadBlock('ответ инструмента', e.result);
