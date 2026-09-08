@@ -263,6 +263,7 @@ details.section>summary.section-head:focus-visible h2{color:var(--navy)}
 .c-err{color:#fff;border-color:var(--crimson);background:var(--crimson)}
 .c-sys{color:var(--muted);border-color:var(--rule)}
 .c-core{color:var(--amber);border-color:var(--amber);background:#fdf6e8}
+.c-route{color:#fff;border-color:var(--navy);background:var(--navy)}
 
 .title{font-size:14.5px;font-weight:600;display:inline}
 .title .name{font-family:var(--mono);font-size:13.5px;font-weight:600}
@@ -330,6 +331,7 @@ pre.json{
 .bar.k-llm span{background:var(--violet)}
 .bar.k-sub span{background:var(--navy)}
 .bar.k-core span{background:var(--amber)}
+.bar.k-route span{background:var(--navy)}
 .dur{font-family:var(--mono);font-size:10.5px;color:var(--muted);margin-top:4px;text-align:right}
 
 /* ---------- tool inventory ---------- */
@@ -768,6 +770,15 @@ function firstJsonAfter(msg, marker){
    so both are accepted, and "null" arrives as a literal string often enough to check. */
 function liftRecord(l){
   if(!l || typeof l !== 'object') return l;
+  // A hop through the java gateway starts a fresh traceparent, so the MCP server behind
+  // it logs a trace id of its own and every call it serves becomes a one-record trace in
+  // the tab strip. The caller's trace rides along in the b3 header the request carried —
+  // the record prints its own headers, so take the trace back from there.
+  const rawMsg = l.message == null ? '' : String(l.message);
+  if(rawMsg.indexOf('x-b3-traceid') >= 0){
+    const b3 = /x-b3-traceid=?["'\[\s]*([0-9a-f]{32})/i.exec(rawMsg);
+    if(b3 && l.traceId !== b3[1]) l = Object.assign({}, l, {traceId: b3[1]});
+  }
   // the overwhelming majority of records are already flat — leave them untouched rather
   // than shallow-copying every one of tens of thousands of 200-key objects
   if(l.traceId && l.app_id && l.message != null &&
@@ -949,6 +960,11 @@ function extractUser(msg, app){
       const str = pyString(msg, j);
       if(str && str.text.trim()) return {text: str.text, atStart: true};
     }
+  }
+  // the third-party client's own hand-off, ahead of everything langflow says
+  if(app.indexOf('comod-adapter') >= 0){
+    const cm = extractComod(msg);
+    if(cm) return cm;
   }
   if(app === 'alfagen-compliance-api'){
     const m = /body:([\s\S]+)$/.exec(msg);
@@ -1180,6 +1196,113 @@ function spanMs(v){
   if(m) return ((+m[1]) * 3600 + (+m[2]) * 60 + parseFloat(m[3])) * 1000;
   const n = parseFloat(v);
   return isNaN(n) ? null : n;
+}
+
+/* The orchestrator that stands between a client and the agent flows. It classifies the
+   message, picks one flow, and — when that flow answers with an error — picks another.
+   Every step is one line of its own, so parse them apart and let buildOne assemble the
+   attempt they describe. */
+function extractRoute(msg){
+  const kv = s => {
+    const out = {};
+    const re = /([\w.]+)=('[^']*'|\S+)/g;
+    let m;
+    while((m = re.exec(s))) out[m[1]] = m[2].replace(/^'|'$/g, '');
+    return out;
+  };
+  if(msg.lastIndexOf('Запрос маршрутизации принят', 0) === 0) return {kind: 'start'};
+  if(msg.lastIndexOf('Запрос маршрутизации обработан', 0) === 0) return {kind: 'end'};
+  const send = /^Отправка запроса агенту:\s*agent=(\S+)/.exec(msg);
+  if(send) return {kind: 'send', agent: send[1]};
+  const post = /^Выполняется POST-запрос:\s*url=(\S+)/.exec(msg);
+  if(post) return {kind: 'post', url: post[1]};
+  if(msg.lastIndexOf('Роутинг:', 0) === 0) return {kind: 'decision', data: kv(msg.slice(8))};
+  if(msg.lastIndexOf('Эвристика завершена:', 0) === 0) return {kind: 'heuristic', data: kv(msg.slice(20))};
+  if(msg.lastIndexOf('Failed-agent redirect:', 0) === 0) return {kind: 'redirect', data: kv(msg.slice(22))};
+  if(msg.lastIndexOf('Нормализация:', 0) === 0){
+    // business=('invest',) social=() … — the tuple keeps its parentheses
+    const b = /business=\(([^)]*)\)/.exec(msg);
+    return {kind: 'norm', domains: b ? b[1].replace(/['\s]/g, '').replace(/,$/, '') : ''};
+  }
+  return null;
+}
+
+/* The message as the third-party client handed it over: the question, who asked it, and
+   which skill the client had already picked for them. This record opens the trace, so it
+   dates the question better than langflow's copy and carries context nothing else has. */
+function extractComod(msg){
+  if(msg.lastIndexOf('Inbound COMOD request received', 0) !== 0) return null;
+  const raw = firstJsonAfter(msg, 'received');
+  // COMOD masks its timestamps into runs of asterisks, which no JSON parser survives.
+  // The repair only touches a bare run standing where a number belongs, never text in
+  // quotes, so markdown in the message itself is left alone.
+  const o = safeJson(raw) || safeJson(String(raw || '').replace(/:\s*\*{2,}[\d.\s*]*(?=\s*[,}\]])/g, ': 0'));
+  const items = o && (o.COMOD2AGENTHUB || o.comod2agenthub);
+  if(!Array.isArray(items)) return null;
+  const of = type => (items.find(x => x && x.type === type) || {}).body || null;
+  const cm = of('comod') || {};
+  const md = of('metadata') || {};
+  // the question travels as an assembly, same shape as the answer does on the way back
+  let text = null;
+  items.forEach(x => {
+    if(text || !x || x.type !== 'assembly' || !Array.isArray(x.children)) return;
+    const node = x.children.find(c => c && c.body && c.body.text);
+    if(node) text = String(node.body.text);
+  });
+  if(!text) return null;
+
+  const ctx = {};
+  ['cus','channelApp','deviceModel','segment','operationSystem','mobileUserRole','am_version',
+   'firstName','lastName','middleName','nickname','selectedSkill','selectedChip','bot_feature']
+    .forEach(k => { if(md[k]) ctx[k] = md[k]; });
+  if(cm.source_channel_id) ctx.sourceChannel = cm.source_channel_id;
+  const via = [cm.source_channel_id, md.channelApp,
+               md.selectedSkill ? 'скилл ' + md.selectedSkill : null,
+               md.selectedChip ? 'чип ' + md.selectedChip : null]
+    .filter(Boolean).join(' · ');
+  return {text: text, cus: cm.cus || md.cus, session: cm.sessionId,
+          channel: cm.source_channel_id || md.channelApp,
+          messageId: cm.messageId, via: via, ctx: Object.keys(ctx).length ? ctx : null};
+}
+
+/* A dozen calls of one tool in a row are told apart only by what was asked, so put the
+   scalar arguments on the row itself and leave the rest to the fold. */
+function argPreview(json){
+  const o = safeJson(json);
+  if(!o || typeof o !== 'object' || Array.isArray(o)) return '';
+  const parts = [];
+  Object.keys(o).forEach(k => {
+    const v = o[k];
+    if(parts.length >= 2 || v == null || typeof v === 'object') return;
+    if(v === false || v === '') return;          // defaults say nothing about the call
+    parts.push(k + '=' + String(v).slice(0, 60));
+  });
+  return parts.join(', ');
+}
+
+/* langflow's MCP transport log. It is the only record of a call to a server that answers
+   through the java gateway — that hop starts a new trace, so the server's own logs land
+   under a trace id of their own and never join this one.
+     [MCP -> {http}] | Request  | <tool> | headers={…} | body={"method":"tools/call",…}
+     [MCP -> {http}] | Response | <tool> | body={…}
+   The component logs its own Request line for the same call with the bare arguments in
+   `body`; only the transport one states the method, which is how the two are told apart. */
+function extractMcpHttp(msg){
+  if(msg.lastIndexOf('[MCP -> {http}]', 0) !== 0) return null;
+  const m = /^\[MCP -> \{http\}\]\s*\|\s*(Request|Response)\s*\|\s*([\w.\-\/]+)\s*\|/.exec(msg);
+  if(!m) return null;
+  const phase = m[1], name = m[2];
+  // tools/list and the other protocol methods are not tool calls
+  if(name.indexOf('/') >= 0) return {phase: phase, method: name, protocol: true};
+  const body = firstJsonAfter(msg, '| body=');
+  if(phase === 'Request'){
+    const o = safeJson(body);
+    if(!o || !o.method) return null;             // the component's copy, without the call
+    const args = o.params && o.params.arguments;
+    return {phase: phase, name: name, args: args ? JSON.stringify(args) : '{}'};
+  }
+  return {phase: phase, name: name, result: body,
+          isError: /"isError"\s*:\s*true/.test(String(body || ''))};
 }
 
 /* langflow: "[TOOL] | Request|Response | name | headers={...} | body=..." */
@@ -1475,10 +1598,13 @@ function buildTraces(fileEntries){
 /* verdict + counters over a scoped slice of events/records — run once for the whole
    trace and again per user request, so each request gets its own findings and stats */
 function summarize(evs, rcs, ctx){
-  const mcpCalls = evs.filter(e => e.kind === 'mcp');
+  // an adapter record is the richest sighting of a call, but not the only one: a server
+  // reached through the gateway is seen by langflow alone, and that is still a call
+  const mcpCalls = evs.filter(e => e.kind === 'mcp' || (e.kind === 'mcpwrap' && e.phase === 'in'));
   const ragHits = evs.filter(e => e.kind === 'rag' && e.chunks != null);
   const subCalls = evs.filter(e => e.kind === 'subagent' && e.phase === 'in');
   const coreCalls = evs.filter(e => e.kind === 'core');
+  const routeEvs = evs.filter(e => e.kind === 'route');
   const coreDetailed = coreCalls.filter(e => e.detailed);
   const calledSubs = Array.from(new Set(subCalls.map(e => e.name)));
   const calledMcp = Array.from(new Set(mcpCalls.map(e => e.name)));
@@ -1489,6 +1615,17 @@ function summarize(evs, rcs, ctx){
 
   const findings = [];
   if(!ctx.userQ) findings.push({level: 'note', text: 'Текст запроса пользователя в этих файлах не найден — возможно, не хватает более ранней страницы выгрузки.'});
+  if(routeEvs.length){
+    const named = Array.from(new Set(routeEvs.filter(e => e.name).map(e => e.name)));
+    const broke = routeEvs.filter(e => !e.name);
+    if(named.length > 1 || broke.length){
+      findings.push({level: 'warn', text: 'Оркестратор менял маршрут: ' +
+        named.map(n => '<code>' + n + '</code>').join(' → ') +
+        (broke.length ? ' — предыдущий флоу вернул ошибку.' : '.')});
+    } else if(named.length){
+      findings.push({level: 'ok', text: 'Оркестратор направил запрос в <code>' + named[0] + '</code>.'});
+    }
+  }
   if(!mcpCalls.length){
     findings.push({level: 'warn', text: 'Ни одного результативного вызова MCP-инструмента. Агент не дошёл до данных — смотрите маршрутизацию, а не адаптер.'});
   } else {
@@ -1593,6 +1730,13 @@ function buildOne(traceId, recs){
     return a;
   };
 
+  // MCP calls made over the http transport stand in two records — the Request states the
+  // arguments, the Response the result — with nothing tying the two together. Pair them
+  // per tool in order of arrival: with several calls of one tool in flight at once that
+  // is a pairing by position, so a row's duration is one of the burst's, not provably its.
+  const mcpHttpPending = new Map();
+  const httpCalls = [];
+
   recs.forEach(r => {
     const msg = r.msg, app = r.app;
 
@@ -1605,6 +1749,7 @@ function buildOne(traceId, recs){
       const same = userQs.find(q => q.text.trim() === text);
       if(same){
         Object.keys(u).forEach(k => { if(!same[k] && u[k] && k !== 'ts') same[k] = u[k]; });
+        if(u.via){ const ev = userEvOf.get(text); if(ev && !ev.meta) ev.meta = u.via; }
         // several services echo the question, some of them only after the answer is out;
         // the earliest sighting is the one closest to when it was actually asked
         if(!u.atStart && r.ts < same.ts){
@@ -1621,7 +1766,7 @@ function buildOne(traceId, recs){
         if(!userQ) userQ = u;
         const ev = {ts: ts, kind: 'user', depth: 0, chip: 'Запрос', chipClass: 'c-user',
                     title: 'Сообщение пользователя', quote: text, app: app,
-                    meta: u.atStart ? 'восстановлено из итогов запуска — точное время неизвестно' : '',
+                    meta: u.via || (u.atStart ? 'восстановлено из итогов запуска — точное время неизвестно' : ''),
                     qIndex: userQs.length - 1};
         userEvOf.set(text, ev);
         events.push(ev);
@@ -1755,6 +1900,27 @@ function buildOne(traceId, recs){
       }
     }
 
+    // --- MCP through the java gateway, as langflow's transport logged it
+    const mh = extractMcpHttp(msg);
+    if(mh && !mh.protocol && mh.name){
+      if(mh.phase === 'Request'){
+        if(!mcpHttpPending.has(mh.name)) mcpHttpPending.set(mh.name, []);
+        mcpHttpPending.get(mh.name).push({ts: r.ts, args: mh.args});
+      } else {
+        const q = mcpHttpPending.get(mh.name);
+        const req = (q && q.length) ? q.shift() : null;
+        const ms = req ? (r.ts - req.ts) : null;
+        httpCalls.push({ts: r.ts, kind: 'mcpwrap', phase: 'in', depth: 2, chip: 'MCP', chipClass: 'c-mcp',
+                        title: 'Инструмент ', name: mh.name, app: app,
+                        startTs: req ? req.ts : r.ts, ms: ms,
+                        params: req ? req.args : null, result: mh.result,
+                        meta: [ms != null ? Math.round(ms) + ' мс' : null,
+                               req ? argPreview(req.args) : null,
+                               'через MCP-шлюз',
+                               mh.isError ? 'инструмент вернул ошибку' : null].filter(Boolean).join(' · ')});
+      }
+    }
+
     // --- RAG
     const rg = extractRag(msg);
     if(rg){
@@ -1810,6 +1976,80 @@ function buildOne(traceId, recs){
                    payload: (r.raw.exception && r.raw.exception !== '(empty)') ? r.raw.exception : null});
     }
   });
+
+  // ---- one row per MCP call, whichever of langflow's two logs saw it ----------------
+  // The component wrapper ([TOOL]) and the http transport ([MCP -> {http}]) describe the
+  // same call from two sides. Where the wrapper spoke, its record is already in the
+  // timeline; the transport copy earns a row only where it did not — which is how a call
+  // to a server behind the java gateway becomes visible at all.
+  const wrapperSeen = events.filter(e => e.kind === 'subagent' || e.kind === 'mcpwrap');
+  httpCalls.forEach(h => {
+    const twin = wrapperSeen.some(e => e.name === h.name && Math.abs(e.ts - h.ts) < 2000);
+    if(!twin) events.push(h);
+  });
+
+  // ---- how the request reached a flow ------------------------------------------------
+  // A message from a third-party client lands on the orchestrator, which classifies it,
+  // picks one agent flow and forwards it there; if that flow answers with an error, the
+  // queue keeper hands the message back and the orchestrator picks another. The agent's
+  // own logs say nothing about any of this — it is all in the orchestrator's routing
+  // lines, one fragment per line, so collect the fragments into the attempt they describe.
+  let att = null;
+  const flushRoute = () => {
+    if(att && (att.agent || att.final)){
+      const bits = [];
+      if(att.candidate || att.final) bits.push('маршрут ' + (att.candidate || '?') + ' → ' + (att.final || att.agent));
+      if(att.domain) bits.push('домен ' + att.domain);
+      if(att.reason) bits.push('причина ' + att.reason);
+      if(att.url) bits.push('flow ' + att.url);
+      if(att.failed) bits.push('после сбоя ' + att.failed);
+      if(att.predicts) bits.push('классификатор: ' + att.predicts);
+      events.push({ts: att.endTs != null ? att.endTs : att.ts, startTs: att.ts,
+                   ms: att.endTs != null ? (att.endTs - att.ts) : null,
+                   kind: 'route', depth: 0, chip: 'Роутер', chipClass: 'c-route',
+                   title: att.failed ? 'Перемаршрутизация в ' : 'Маршрутизация в ',
+                   name: att.agent || att.final, app: att.app, meta: bits.join(' · ')});
+    }
+    att = null;
+  };
+  recs.forEach(r => {
+    if(r.app.indexOf('agent-orchestrator') >= 0){
+      const rt = extractRoute(r.msg);
+      if(!rt) return;
+      if(!att) att = {ts: r.ts, app: r.app};
+      if(rt.kind === 'send') att.agent = rt.agent;
+      else if(rt.kind === 'post'){
+        // the same client makes both calls: the classifier, then the flow itself
+        const path = /\/api\/v\d+\/[\w.-]*/.exec(rt.url);
+        if(path) att.url = path[0];
+        else att.predicts = (att.predicts || 0) + 1;
+      }
+      else if(rt.kind === 'decision'){
+        att.candidate = rt.data.candidate; att.final = rt.data.final;
+        att.reason = rt.data.reason || att.reason; att.mode = rt.data.mode;
+      }
+      else if(rt.kind === 'heuristic'){ if(!att.domain) att.domain = rt.data.domain; }
+      // the redirect line names the flow that failed and the one taking over; it is
+      // written before the heuristic re-states the old domain, so it claims the field
+      else if(rt.kind === 'redirect'){
+        att.failed = rt.data.failed_agent; att.domain = rt.data.domain || att.domain;
+        att.agent = att.agent || rt.data.agent;
+      }
+      else if(rt.kind === 'norm' && rt.domains) att.domains = rt.domains;
+      if(rt.kind === 'end'){ att.endTs = r.ts; flushRoute(); }
+      return;
+    }
+    // the queue keeper is the one that notices a flow answered with an error
+    if(r.msg.lastIndexOf('AI Flow error will be rerouted by Orchestrator', 0) === 0){
+      const fid = /agentError='([^']+)'/.exec(r.msg);
+      const cnt = /rerouteCount='(\d+)'/.exec(r.msg);
+      events.push({ts: r.ts, kind: 'route', depth: 0, chip: 'Роутер', chipClass: 'c-err',
+                   title: 'Флоу вернул ошибку — запрос уходит в другой агент', app: r.app,
+                   meta: [fid ? 'flow ' + fid[1] : null,
+                          cnt ? 'перемаршрутизация №' + cnt[1] : null].filter(Boolean).join(' · ')});
+    }
+  });
+  flushRoute();
 
   // ---- core services behind the MCP calls ------------------------------------------
   // The adapter logs the hop it makes (upstream_request: service + endpoint) and nothing
@@ -2089,7 +2329,7 @@ function buildOne(traceId, recs){
 
   // the real conversation ends at the last meaningful event; stray stream-close
   // warnings minutes later must not stretch the scale
-  const STORY = {user: 1, llm: 1, subagent: 1, mcp: 1, mcpwrap: 1, rag: 1, answer: 1, core: 1};
+  const STORY = {user: 1, llm: 1, subagent: 1, mcp: 1, mcpwrap: 1, rag: 1, answer: 1, core: 1, route: 1};
   const storyEvents = clean.filter(e => STORY[e.kind]);
   const tEnd = storyEvents.length ? storyEvents[storyEvents.length - 1].ts : t1;
   meta.durationMs = Math.max(tEnd - t0, 1);
@@ -2620,7 +2860,9 @@ function renderReport(){
     ['ФИО', fio || '—'],
     ['cus', (tr.userQ && tr.userQ.cus) || ctx.cus || '—'],
     ['sessionId', (tr.userQ && tr.userQ.session) || '—'],
-    ['канал', (tr.userQ && tr.userQ.channel) || ctx.channelApp || '—'],
+    ['канал', [ctx.sourceChannel, ctx.channelApp || (tr.userQ && tr.userQ.channel)]
+                .filter(Boolean).filter((v, i, a) => a.indexOf(v) === i).join(' · ') || '—'],
+    ['скилл клиента', [ctx.selectedSkill, ctx.selectedChip].filter(Boolean).join(' · ') || '—'],
     ['устройство', ctx.deviceModel || (tr.userQ && tr.userQ.os) || '—'],
     ['сегмент', ctx.segment || (tr.userQ && tr.userQ.segment) || '—'],
     ['начало', m.from ? m.from.toLocaleString('ru-RU') : '—'],
@@ -2679,7 +2921,8 @@ function renderReport(){
       const left = Math.max(0, Math.min(100, st / total * 100));
       const w = Math.max(1.2, Math.min(100 - left, dur / total * 100));
       const k = (e.kind === 'mcp' || e.kind === 'mcpwrap') ? 'k-mcp' : e.kind === 'rag' ? 'k-rag' :
-                e.kind === 'llm' ? 'k-llm' : e.kind === 'core' ? 'k-core' : 'k-sub';
+                e.kind === 'llm' ? 'k-llm' : e.kind === 'core' ? 'k-core' :
+                e.kind === 'route' ? 'k-route' : 'k-sub';
       return '<div class="bar ' + k + '"><span style="left:' + left.toFixed(2) + '%;width:' + w.toFixed(2) + '%"></span></div>' +
              (e.ms != null ? '<div class="dur">' + esc(fmtMs(e.ms)) + '</div>' : '');
     })();
