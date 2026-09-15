@@ -364,7 +364,7 @@ table.raw td.msg{white-space:pre-wrap;word-break:break-word;max-width:0;width:10
 table.raw tr:hover td{background:var(--paper)}
 .lvl{font-weight:600}
 .lvl-ERROR{color:var(--crimson)}
-.lvl-WARN{color:var(--amber)}
+.lvl-WARN,.lvl-WARNING{color:var(--amber)}
 .lvl-INFO{color:var(--forest)}
 .lvl-DEBUG,.lvl-TRACE{color:var(--muted)}
 
@@ -503,6 +503,32 @@ body{background:var(--ground);letter-spacing:.01em}
 .finding{gap:13px;padding:12px 16px;border-color:var(--rule-soft)}
 .finding .dot{width:8px;height:8px;margin-top:6px}
 .finding code{background:var(--paper);border-radius:5px;padding:2px 5px}
+
+/* ---------- quality pipeline ---------- */
+/* the nightly grading run, read as a short log rather than as a timeline: the steps are
+   seconds apart inside a batch that is hours away from the conversation, so a time bar
+   would say nothing a timestamp does not */
+.qsteps{
+  margin-top:14px;border:1px solid var(--rule);border-radius:14px;background:var(--paper-2);
+  box-shadow:0 1px 2px rgba(60,64,67,.08);overflow:hidden;
+}
+.qstep{
+  display:grid;grid-template-columns:auto auto auto minmax(0,1fr);
+  align-items:baseline;gap:12px;
+  padding:9px 16px;border-bottom:1px solid var(--rule-soft);font-size:13px;
+}
+.qstep:last-child{border-bottom:none}
+.qstep .qtime{font-family:var(--mono);font-size:11.5px;color:var(--muted);font-variant-numeric:tabular-nums}
+.qstep .qtype{
+  font-family:var(--mono);font-size:10.5px;color:var(--violet);
+  background:var(--paper);border-radius:5px;padding:2px 6px;white-space:nowrap;
+}
+.qstep .qapp{font-family:var(--mono);font-size:11.5px;color:var(--ink-soft);white-space:nowrap}
+.qstep .qtext{color:var(--ink);min-width:0;overflow-wrap:anywhere}
+@media(max-width:640px){
+  .qstep{grid-template-columns:auto minmax(0,1fr);row-gap:4px}
+  .qstep .qtext{grid-column:1/-1}
+}
 
 .stats{gap:10px;margin-top:12px}
 .stat{
@@ -782,8 +808,10 @@ function liftRecord(l){
     if(b3 && l.traceId !== b3[1]) l = Object.assign({}, l, {traceId: b3[1]});
   }
   // the overwhelming majority of records are already flat — leave them untouched rather
-  // than shallow-copying every one of tens of thousands of 200-key objects
-  if(l.traceId && l.app_id && l.message != null &&
+  // than shallow-copying every one of tens of thousands of 200-key objects. A record the
+  // quality pipeline tagged is never one of them: it has to be re-keyed onto the trace it
+  // grades, see langfuse below.
+  if(l.traceId && l.app_id && l.message != null && l['attributes.langfuse_trace_id'] == null &&
      l['envoy.message'] == null && l['envoy.method'] == null && l.method == null) return l;
   const val = v => (v == null || v === '' || v === 'null') ? null : v;
   const pick = function(){
@@ -829,7 +857,18 @@ function liftRecord(l){
   const coreTrace = coreApp
     ? (/([0-9a-f]{32})$/i.exec(String(pick('userCode', 'X-External-User-Code') || '')) || [])[1] || null
     : null;
-  const traceId = pick('traceId', 'trace_id', 'envoy.traceId', 'envoy.trace_id') ||
+  // The quality pipeline (collector -> arbiter -> pipeline-worker) grades a finished
+  // conversation hours later, in a nightly batch, under a trace id of its own — one id
+  // covering a whole batch of unrelated conversations. What it actually graded is named
+  // in attributes.langfuse_trace_id, so group by that: otherwise the nightly run becomes
+  // its own unattributed tab and the verdict is never seen next to the answer it judges.
+  const langfuseTrace = val(l['attributes.langfuse_trace_id']);
+  // the collector's own reads out of langfuse/clickhouse carry no attributes at all —
+  // the trace they fetch is a query parameter of the url the http client logged
+  const collectorTrace = (!langfuseTrace && rawMsg.indexOf('param_trace_id=') >= 0)
+    ? (/param_trace_id=([0-9a-f]{32})/i.exec(rawMsg) || [])[1] || null : null;
+  const traceId = langfuseTrace || collectorTrace ||
+                  pick('traceId', 'trace_id', 'envoy.traceId', 'envoy.trace_id') ||
                   from('traceId') || from('trace_id') || requestTrace || coreTrace;
   const appId = pick('app_id', 'resource.service_name', 'resource.k8s_container_name', 'envoy.service') || coreApp;
   // an istio access log has no message of its own — state the hop it recorded
@@ -855,6 +894,9 @@ function liftRecord(l){
 
   const out = Object.assign({}, l);
   const put = (k, v) => { if(v != null && !val(out[k])) out[k] = v; };
+  // not put(): a graded record may already carry the pipeline's own traceId, and the
+  // conversation it grades has to win. The pipeline's id stays readable in trace_id.
+  if(langfuseTrace) out.traceId = langfuseTrace;
   put('traceId', traceId);
   put('app_id', appId);
   // not put(): what sits in `message` on these records is the raw envelope, with the
@@ -1537,6 +1579,54 @@ function extractDelivery(msg){
   return null;
 }
 
+/* The quality pipeline grades a finished conversation in a nightly batch: the collector
+   pulls the trace out of langfuse, the arbiter runs the judge over it, the pipeline
+   worker publishes whatever came of the verdict. Everything worth reading sits in OTEL
+   attributes rather than in the message text, and the whole run happens hours after the
+   conversation — so this is a verdict *about* the trace, not a step inside it, and it is
+   reported in its own section instead of being spliced into the chronicle. */
+const QUALITY_APP = /quality-(collector|arbiter|pipeline-worker)/;
+
+function extractQuality(recs){
+  const rows = recs.filter(r => QUALITY_APP.test(r.app) ||
+                                (r.raw && r.raw['attributes.langfuse_trace_id'] != null));
+  if(!rows.length) return null;
+  const at = (r, k) => {
+    const v = r.raw ? r.raw['attributes.' + k] : null;
+    return (v == null || v === '' || v === 'null') ? null : String(v);
+  };
+  const q = {records: rows.length, from: rows[0].t, to: rows[rows.length - 1].t, steps: []};
+  const keep = (k, v) => { if(v != null) q[k] = v; };
+  rows.forEach(r => {
+    keep('strategy', at(r, 'evaluation_strategy'));
+    keep('kind', at(r, 'evaluation_kind'));
+    keep('configVersion', at(r, 'config_version'));
+    keep('batchId', at(r, 'batch_id'));
+    keep('itemId', at(r, 'pipeline_item_id'));
+    keep('arbiterItemId', at(r, 'arbiter_item_id'));
+    keep('exampleId', at(r, 'our_example_id'));
+    keep('rawScore', at(r, 'raw_score'));
+    keep('score', at(r, 'score'));
+    // what the pipeline did with the verdict: hand the example to manual labelling, or
+    // publish it as a few-shot example on its own
+    if(at(r, 'dependency') === 'label-studio'){
+      q.humanReview = {task: at(r, 'ls_task_id'), project: at(r, 'project_id'), job: at(r, 'job_id')};
+    }
+    if(r.msg.indexOf('Auto-accept') >= 0){
+      q.autoAccept = {job: at(r, 'job_id'), store: at(r, 'dependency')};
+    }
+    // an item the arbiter closed without a score was graded by a strategy that does not
+    // produce one — a different statement from "the verdict has not been logged yet"
+    if(at(r, 'record_type') === 'lifecycle' && r.app.indexOf('arbiter') >= 0 &&
+       r.msg.indexOf('обработан') >= 0) q.arbiterDone = true;
+    // the http client's own chatter is the trace lookup, not a step of the evaluation
+    if(r.logger !== 'httpx' && at(r, 'record_type') != null){
+      q.steps.push({ts: r.ts, t: r.t, app: r.app, text: r.msg, type: at(r, 'record_type')});
+    }
+  });
+  return q;
+}
+
 /* ---- main build ------------------------------------------------------ */
 
 function buildTraces(fileEntries){
@@ -1574,7 +1664,11 @@ function buildTraces(fileEntries){
       seen.add(id);
       const t = parseKibanaTs(l['@timestamp'] || l.timestamp);
       all.push({raw: l, t: t, ts: t ? t.getTime() : 0, srcFile: f.name,
-                app: l.app_id || '', msg: l.message || '', level: l.level || '',
+                app: l.app_id || '', msg: l.message || '',
+                // python lowercases its levels and only the records that go through
+                // liftRecord get normalized there — the flat ones arrive as written. Fold
+                // the casing here so the raw-log filter offers INFO once, not INFO и info.
+                level: String(l.level == null ? '' : l.level).toUpperCase(),
                 logger: l.logger || l.logger_name || '', traceId: l.traceId || NO_TRACE});
     });
   });
@@ -2625,6 +2719,7 @@ function buildOne(traceId, recs){
 
   return {
     traceId: traceId, meta: meta, records: recs, events: clean,
+    quality: extractQuality(recs),
     userQ: userQ, userQs: userQs, plan: plan, finalAnswer: finalAnswer, answerParts: answerEvParts, delivered: delivered,
     availableTools: allAvailable, calledMcp: calledMcp, calledSubs: calledSubs,
     plannedSubs: plannedNames,
@@ -3164,6 +3259,68 @@ function renderReport(){
     }).join('') + '</div>'
   ) : '';
 
+  // ---- quality pipeline: the nightly verdict on this conversation. It runs hours after
+  // the trace closes, so it gets a section of its own rather than rows in the chronicle,
+  // where it would stretch the time scale past everything that actually happened.
+  const qa = tr.quality;
+  const qualityBlock = (() => {
+    if(!qa) return '';
+    // a dump can catch the pipeline at any point, so most of these are routinely absent —
+    // show the ones that are known instead of a grid of dashes
+    const known = [
+      ['стратегия', qa.strategy],
+      ['что оценивали', qa.kind],
+      ['оценка', qa.score != null
+          ? qa.score + (qa.rawScore != null && qa.rawScore !== qa.score ? ' (сырая ' + qa.rawScore + ')' : '')
+          : (qa.rawScore != null ? 'сырая ' + qa.rawScore : null)],
+      ['конфиг', qa.configVersion],
+      ['batch', qa.batchId],
+      ['pipeline item', qa.itemId],
+      ['прогон', qa.from ? qa.from.toLocaleString('ru-RU') : null]
+    ].filter(c => c[1] != null && c[1] !== '');
+    const cells = known.length > 1
+      ? '<div class="idbar" style="margin-top:14px">' + known.map(c =>
+          '<div class="idcell"><dt>' + esc(c[0]) + '</dt><dd>' + esc(c[1]) + '</dd></div>').join('') + '</div>'
+      : '';
+
+    const verdicts = [];
+    if(qa.humanReview){
+      verdicts.push({level: 'note', text: 'Отправлено на ручную разметку в Label Studio' +
+        (qa.humanReview.task ? ' — задача <code>#' + esc(qa.humanReview.task) + '</code>' : '') +
+        (qa.humanReview.project ? ', проект <code>' + esc(qa.humanReview.project) + '</code>' : '') + '.'});
+    }
+    if(qa.autoAccept){
+      verdicts.push({level: 'ok', text: 'Ответ принят автоматически и опубликован как few-shot пример' +
+        (qa.autoAccept.store ? ' в <code>' + esc(qa.autoAccept.store) + '</code>' : '') + '.'});
+    }
+    if(qa.score == null && qa.rawScore == null){
+      verdicts.push({level: 'note', text: qa.arbiterDone
+        ? 'Арбитр отработал' + (qa.strategy ? ' по стратегии <code>' + esc(qa.strategy) + '</code>' : '') +
+          ', но числовой оценки не выставил.'
+        : qa.steps.length
+          ? 'Трейс взят в работу, оценки в этой выгрузке ещё нет — она пишется позже, в логах арбитра.'
+          : 'Коллектор выгружал этот трейс в quality-пайплайн' +
+            (qa.from ? ' ' + esc(qa.from.toLocaleString('ru-RU')) : '') +
+            ', но логов самой оценки в выгрузке нет.'});
+    }
+    if(qa.exampleId) verdicts.push({level: 'note', text: 'Идентификатор примера: <code>' + esc(qa.exampleId) + '</code>.'});
+
+    const steps = qa.steps.length ? '<div class="qsteps">' + qa.steps.map(st =>
+      '<div class="qstep"><span class="qtime">' + esc(fmtAbs(st.ts)) + '</span>' +
+      '<span class="qtype">' + esc(st.type) + '</span>' +
+      '<span class="qapp">' + esc(st.app.replace(/^aiagentscn-quality-/, '')) + '</span>' +
+      '<span class="qtext">' + esc(st.text) + '</span></div>').join('') + '</div>' : '';
+
+    return '<div class="section"><div class="section-head"><h2>Оценка качества</h2>' +
+      '<span class="hint">ночной прогон quality-пайплайна — идёт через несколько часов после разговора, ' +
+      'поэтому в хронику и длительность трейса не входит</span></div>' +
+      cells +
+      (verdicts.length ? '<div class="verdict">' +
+        verdicts.map(x => '<div class="finding ' + x.level + '"><span class="dot"></span><div>' + x.text + '</div></div>').join('') +
+        '</div>' : '') +
+      steps + '</div>';
+  })();
+
   host.innerHTML =
     '<div class="dossier">' +
       '<div class="eyebrow">О чём спросили' + (multiQ ? ' — запросов: ' + questions.length : '') + '</div>' +
@@ -3190,6 +3347,7 @@ function renderReport(){
         '<div class="meta" style="margin-top:4px">' + esc(g.sample.replace(/\s+/g, ' ').slice(0, 260)) + '</div>' +
         '</div></div>').join('') + '</div></div>' : '') +
     answerBlock +
+    qualityBlock +
     '<details class="section" id="rawfold"><summary class="section-head"><h2>Сырые записи</h2>' +
       '<span class="hint">' + tr.records.length + ' шт. в этом трейсе — нажмите, чтобы раскрыть</span></summary>' +
       '<div class="rawbar">' +
