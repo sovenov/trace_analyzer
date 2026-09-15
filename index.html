@@ -959,6 +959,27 @@ const REFUSAL = [/нет данных/i, /не могу/i, /к сожалени�
 /* The langflow run endpoint is versioned and sometimes namespaced by installation:
    /api/v1/run/<flow>, /api/v1/alfi/run/<flow>, … — match the shape, not one literal. */
 const LANGFLOW_RUN = /\/api\/v\d+\/(?:[\w.-]+\/)?run\//;
+/* The apo flows are called at a different endpoint — /api/v1/flows/<name>/<flowId> — and
+   are handed the dialogue itself instead of one input string, then answer inline with the
+   http response. Same service, same access log, a different payload at both ends. */
+const LANGFLOW_FLOW = /\/api\/v\d+\/flows\//;
+
+/* langflow's access middleware writes a request and its response as two lines:
+     [ACCESS] -> Request  POST <path> headers={…} body={…}
+     [ACCESS] -> Response POST <path> -> <code> | headers=… | body={…}
+   Everything the caller sent and got back is in there, and for the apo endpoint that is
+   the only place either one appears in full. */
+function extractAccess(msg, app){
+  if(app !== 'alfagen-langflow' || msg.lastIndexOf('[ACCESS]', 0) !== 0) return null;
+  const m = /->\s*(Request|Response)\s+([A-Z]+)\s+(\S+)(?:\s*->\s*(\d{3}))?/.exec(msg);
+  if(!m) return null;
+  return {phase: m[1], method: m[2], path: m[3], code: m[4] ? +m[4] : null,
+          body: firstJsonAfter(msg, 'body=')};
+}
+
+/* findings are written as HTML and get values straight out of the logs */
+const escText = s => String(s == null ? '' : s)
+  .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 
 function extractUser(msg, app){
   // langflow access log carries a clean JSON body
@@ -993,6 +1014,19 @@ function extractUser(msg, app){
       return {text: unesc(iv[1]), session: sid && sid[1]};
     }
   }
+  // the apo endpoint is given the conversation, not one string: {customerId, history:[…]}.
+  // What was asked is the last thing the customer said in it.
+  if(app === 'alfagen-langflow' && LANGFLOW_FLOW.test(msg)){
+    const ac = extractAccess(msg, app);
+    const o = (ac && ac.phase === 'Request') ? safeJson(ac.body) : null;
+    const hist = o && Array.isArray(o.history) ? o.history.filter(h => h && h.text) : null;
+    if(hist && hist.length){
+      const said = hist.filter(h => String(h.party || '').toUpperCase() === 'CUSTOMER');
+      const last = (said.length ? said : hist)[said.length ? said.length - 1 : hist.length - 1];
+      return {text: String(last.text), cus: o.customerId, session: last.sessionId,
+              messageId: last.messageId, via: 'endpoint ' + ac.path};
+    }
+  }
   // Some dumps have no access log at all — then the only full copy of the question is
   // langflow's run summary, "Run outputs: inputs={'input_value': '…'}". That record is
   // written when the flow finishes, so the event is anchored to the start of the trace.
@@ -1002,7 +1036,7 @@ function extractUser(msg, app){
       let j = i + "'input_value'".length;
       while(j < msg.length && msg[j] !== "'" && msg[j] !== '"') j++;
       const str = pyString(msg, j);
-      if(str && str.text.trim()) return {text: str.text, atStart: true};
+      if(str && str.text.trim()) return {text: str.text, atStart: true, fallback: true};
     }
   }
   // the third-party client's own hand-off, ahead of everything langflow says
@@ -1459,6 +1493,17 @@ function extractToolKinds(msg){
 }
 
 function extractFinalAnswer(msg, app){
+  // the apo endpoint answers inline: the body the caller got back is the answer, next to
+  // the agent that wrote it. A 200 here is also the delivery — there is no channel hop.
+  const ac = extractAccess(msg, app);
+  if(ac && ac.phase === 'Response' && ac.code === 200){
+    const o = safeJson(ac.body);
+    if(o && typeof o.answer === 'string' && o.answer.trim()){
+      return {text: o.answer, delivered: true,
+              via: 'HTTP 200' + (o.agent ? ' · агент ' + o.agent : '') +
+                   (o.messageType ? ' · ' + o.messageType : '')};
+    }
+  }
   if(app === 'alfagen-strategy-api' && msg.indexOf('Request to LangFlow succeeded') >= 0){
     const m = /LangFlowResponse\[sessionId=([^,]*), text=([\s\S]*)\]\s*$/.exec(msg);
     if(m) return {session: m[1], text: m[2]};
@@ -1709,6 +1754,7 @@ function summarize(evs, rcs, ctx){
   const subCalls = evs.filter(e => e.kind === 'subagent' && e.phase === 'in');
   const coreCalls = evs.filter(e => e.kind === 'core');
   const routeEvs = evs.filter(e => e.kind === 'route');
+  const rejects = evs.filter(e => e.kind === 'reject');
   const coreDetailed = coreCalls.filter(e => e.detailed);
   const calledSubs = Array.from(new Set(subCalls.map(e => e.name)));
   const calledMcp = Array.from(new Set(mcpCalls.map(e => e.name)));
@@ -1719,6 +1765,16 @@ function summarize(evs, rcs, ctx){
 
   const findings = [];
   if(!ctx.userQ) findings.push({level: 'note', text: 'Текст запроса пользователя в этих файлах не найден — возможно, не хватает более ранней страницы выгрузки.'});
+  // when the request was turned away at the door, that is the headline: everything below
+  // is only describing what did not happen as a consequence
+  if(rejects.length){
+    const r0 = rejects[rejects.length - 1];
+    const why = r0.why
+      ? ' — ' + escText(String(r0.why).replace(/\s+/g, ' ').trim().slice(0, 300)) : '';
+    findings.push({level: 'warn', text: r0.broke
+      ? 'langflow ответил ошибкой: <code>' + escText(r0.meta) + '</code>' + why + '.'
+      : 'Запрос отклонён на входе: <code>' + escText(r0.meta) + '</code>' + why + '. Флоу не запускался.'});
+  }
   if(routeEvs.length){
     const named = Array.from(new Set(routeEvs.filter(e => e.name).map(e => e.name)));
     const broke = routeEvs.filter(e => !e.name);
@@ -1731,7 +1787,11 @@ function summarize(evs, rcs, ctx){
     }
   }
   if(!mcpCalls.length){
-    findings.push({level: 'warn', text: 'Ни одного результативного вызова MCP-инструмента. Агент не дошёл до данных — смотрите маршрутизацию, а не адаптер.'});
+    const rej = rejects.length ? rejects[rejects.length - 1] : null;
+    findings.push({level: 'warn', text: rej
+      ? (rej.broke ? 'Инструменты не вызывались — запуск оборвался ошибкой раньше.'
+                   : 'Инструменты не вызывались — до них дело не дошло, запрос отклонён на входе.')
+      : 'Ни одного результативного вызова MCP-инструмента. Агент не дошёл до данных — смотрите маршрутизацию, а не адаптер.'});
   } else {
     findings.push({level: 'ok', text: 'Вызовов MCP-инструментов: <b>' + mcpCalls.length + '</b> (' + calledMcp.map(n => '<code>' + n + '</code>').join(', ') + ').'});
   }
@@ -1771,7 +1831,9 @@ function summarize(evs, rcs, ctx){
     findings.push({level: 'warn', text: 'Записей уровня ERROR/WARN: <b>' + errTotal +
       '</b> в <b>' + errs.length + '</b> различных видах — вынесены в отдельный раздел ниже.'});
   }
-  if(delivered) findings.push({level: 'ok', text: 'Ответ доставлен в чат.'});
+  if(delivered) findings.push({level: 'ok', text: ctx.answerVia
+    ? 'Ответ отдан вызывающей системе в ответе на запрос (' + escText(ctx.answerVia) + ').'
+    : 'Ответ доставлен в чат.'});
   else if(finalAnswer) findings.push({level: 'note', text: 'Подтверждения доставки в bot-conversation-api нет.'});
 
   return {
@@ -1846,7 +1908,11 @@ function buildOne(traceId, recs){
 
     // --- user question. The same question is reported by several services (merge
     // those), but a genuinely new question text starts a new segment of the trace.
-    const u = extractUser(msg, app);
+    let u = extractUser(msg, app);
+    // "Run outputs" only stands in for a missing access log. A flow that calls sub-flows
+    // logs one such line per sub-flow, each carrying the internal string that sub-flow was
+    // handed — once the real question is known, none of those is a question.
+    if(u && u.fallback && userQ) u = null;
     if(u && u.ctx) meta.ctx = Object.assign(meta.ctx || {}, u.ctx);
     if(u && u.text && u.text.trim()){
       const text = u.text.trim();
@@ -2070,8 +2136,10 @@ function buildOne(traceId, recs){
       const faParts = answerParts(fa.text.trim());
       finalAnswer = humanizeAnswer(fa.text.trim()).trim();
       if(fa.messageId) answerMsgId = fa.messageId;
+      if(fa.delivered){ delivered = true; meta.answerVia = fa.via || null; }
       events.push({ts: r.ts, kind: 'answer', depth: 0, chip: 'Ответ', chipClass: 'c-ans',
-                   title: 'Ответ отдан в сессию', parts: faParts, quote: finalAnswer, app: app, full: true});
+                   title: 'Ответ отдан в сессию', parts: faParts, quote: finalAnswer, app: app, full: true,
+                   meta: fa.via || '', deliveredHere: !!fa.delivered});
     }
     const dl = extractDelivery(msg);
     if(dl){
@@ -2086,6 +2154,30 @@ function buildOne(traceId, recs){
                      title: 'Ответ отправлен пользователю', app: app,
                      meta: dl.userId ? 'userId ' + dl.userId : ''});
       }
+    }
+
+    // --- a run that ended at the http layer: 401/403 turned away at the door, or a 500
+    // the flow died with. Either way it is the story of the trace, and the access log
+    // carries it at level INFO, where the error section below never looks.
+    const acc = extractAccess(msg, app);
+    if(acc && acc.phase === 'Response' && acc.code >= 400){
+      const det = safeJson(acc.body);
+      let detail = det && (det.detail || det.message || det.error);
+      // langflow reports its own failure as a json string nested inside `detail`
+      if(typeof detail === 'string' && detail.trim().charAt(0) === '{'){
+        const inner = safeJson(detail);
+        if(inner && inner.message) detail = inner.message;
+      }
+      if(typeof detail !== 'string') detail = null;
+      // 4xx never reached the graph; 5xx means it ran and fell over inside
+      const broke = acc.code >= 500;
+      events.push({ts: r.ts, kind: 'reject', depth: 0, chip: broke ? 'Сбой' : 'Отказ',
+                   chipClass: 'c-err', app: app, broke: broke, code: acc.code,
+                   title: broke ? 'langflow ответил ошибкой' : 'Запрос отклонён на входе в langflow',
+                   meta: acc.method + ' ' + acc.path + ' → ' + acc.code,
+                   // not `detail`: that name makes the chronicle add a "что делал сервис"
+                   // fold repeating the quote it already shows
+                   quote: detail || acc.body || '', why: detail});
     }
 
     // --- errors
@@ -2531,7 +2623,8 @@ function buildOne(traceId, recs){
 
   // the real conversation ends at the last meaningful event; stray stream-close
   // warnings minutes later must not stretch the scale
-  const STORY = {user: 1, llm: 1, subagent: 1, mcp: 1, mcpwrap: 1, rag: 1, answer: 1, core: 1, route: 1};
+  const STORY = {user: 1, llm: 1, subagent: 1, mcp: 1, mcpwrap: 1, rag: 1, answer: 1, core: 1,
+                 route: 1, reject: 1};
   const storyEvents = clean.filter(e => STORY[e.kind]);
   const tEnd = storyEvents.length ? storyEvents[storyEvents.length - 1].ts : t1;
   meta.durationMs = Math.max(tEnd - t0, 1);
@@ -2697,7 +2790,7 @@ function buildOne(traceId, recs){
   const userCode = userCodeRec ? (userCodeRec.raw['X-External-User-Code'] || userCodeRec.raw.userCode) : null;
   const agg = summarize(clean, recs, {userQ: userQ, plan: plan, finalAnswer: finalAnswer,
     delivered: delivered, allAvailable: allAvailable, errs: errs, userCode: userCode,
-    seconds: meta.durationMs / 1000});
+    answerVia: meta.answerVia, seconds: meta.durationMs / 1000});
 
   const segments = userQs.map((q, i) => {
     const segEvents = clean.filter(e => segOf(e.ts) === i);
@@ -2706,13 +2799,17 @@ function buildOne(traceId, recs){
     const ansEv = segEvents.filter(e => e.kind === 'answer' && e.quote).pop();
     const segAnswer = ansEv ? ansEv.quote : null;
     const segParts = ansEv ? ansEv.parts : null;
-    const segDelivered = segEvents.some(e => e.kind === 'answer' && /отправлен пользователю/.test(e.title || ''));
+    // the async stack proves delivery with a channel record; a synchronous endpoint
+    // proves it by having answered the call at all
+    const segDelivered = segEvents.some(e => e.kind === 'answer' &&
+      (e.deliveredHere || /отправлен пользователю/.test(e.title || '')));
     const segErrs = errs.map(g => Object.assign({}, g, {count: g.tsList.filter(ts => segOf(ts) === i).length}))
                         .filter(g => g.count > 0);
     const segEnd = segEvents.length ? segEvents[segEvents.length - 1].ts : q.ts;
     const view = summarize(segEvents, segRecs, {userQ: q, plan: planEv ? planEv.planData : null,
       finalAnswer: segAnswer, delivered: segDelivered, allAvailable: allAvailable,
-      errs: segErrs, userCode: userCode, seconds: Math.max((segEnd - q.ts) / 1000, 0)});
+      errs: segErrs, userCode: userCode, answerVia: meta.answerVia,
+      seconds: Math.max((segEnd - q.ts) / 1000, 0)});
     return {index: i, question: q, findings: view.findings, stats: view.stats,
             finalAnswer: segAnswer, answerParts: segParts, delivered: segDelivered};
   });
