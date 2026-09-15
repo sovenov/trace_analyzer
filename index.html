@@ -118,6 +118,9 @@ body{
    and customer code are what you scan for, so they never get cut. */
 .tab .tmid{display:flex;align-items:baseline;gap:7px;min-width:0}
 .tab .tid{flex:none;white-space:nowrap}
+/* the strip shows three near-identical rows when one message was retried — say so there,
+   not only inside the report nobody has opened yet */
+.tab .trep{flex:none;white-space:nowrap;color:var(--amber)}
 .tab .tq{flex:0 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .tab .tcus{flex:none;white-space:nowrap}
 .tab .tfio{flex:0 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
@@ -457,6 +460,7 @@ body{background:var(--ground);letter-spacing:.01em}
 .tab .ttime{font-family:var(--mono);font-size:11.5px}
 .tab .tnum{font-size:11.5px}
 .tab .tq{font-family:var(--sans);font-size:12.5px}
+.tab .trep{font-family:var(--mono);font-size:11px}
 .tab .tcus{font-family:var(--mono);font-size:11.5px;color:var(--muted)}
 .tab .tfio{font-family:var(--sans);font-size:12px;color:var(--muted)}
 .tab[aria-selected="true"] .tcus,.tab[aria-selected="true"] .tfio{color:#0B57D0}
@@ -1734,6 +1738,8 @@ function buildTraces(fileEntries){
     (a.traceId === NO_TRACE) - (b.traceId === NO_TRACE) ||
     (a.meta.from ? a.meta.from.getTime() : 0) - (b.meta.from ? b.meta.from.getTime() : 0));
 
+  markRetries(traces);
+
   // the strip is ordered by time, but the trace worth opening first is the substantial
   // one, not whichever happened earliest — keep that as the landing tab
   let active = 0;
@@ -1742,6 +1748,45 @@ function buildTraces(fileEntries){
   });
 
   return {traces: traces, files: ordered, total: all.length, active: active};
+}
+
+/* One message sent more than once is not several conversations: a request that was
+   turned away gets retried, and every retry opens a trace of its own. sessionId alone
+   does not say that — one chat session covers a whole day of unrelated questions, six of
+   them in some of these dumps — but sessionId together with messageId names exactly one
+   message, so traces sharing both are repeats of it. They stay separate traces, because a
+   traceId is what the analyst searches ELK by; they just say so. */
+function markRetries(traces){
+  const groups = new Map();
+  traces.forEach(t => {
+    const q = t.userQ || {};
+    if(!q.session || !q.messageId) return;
+    const key = q.session + ' ' + q.messageId;
+    if(!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(t);
+  });
+  const outcome = t => {
+    const rej = (t.events || []).filter(e => e.kind === 'reject').pop();
+    if(rej) return 'HTTP ' + rej.code;
+    return t.finalAnswer ? 'ответ получен' : 'ответа нет';
+  };
+  groups.forEach(group => {
+    if(group.length < 2) return;
+    group.sort((a, b) => (a.meta.from ? a.meta.from.getTime() : 0) -
+                         (b.meta.from ? b.meta.from.getTime() : 0));
+    group.forEach((t, i) => {
+      t.retry = {index: i + 1, total: group.length,
+                 messageId: (t.userQ || {}).messageId,
+                 others: group.filter(x => x !== t)
+                   .map(x => ({traceId: x.traceId, from: x.meta.from, outcome: outcome(x)}))};
+      const list = t.retry.others.map(o =>
+        '<code>' + escText(o.traceId) + '</code>' +
+        (o.from ? ' ' + o.from.toLocaleTimeString('ru-RU') : '') + ' — ' + escText(o.outcome)).join(', ');
+      t.findings.unshift({level: 'note', text: 'Одно и то же обращение отправлено ' +
+        group.length + ' раза: это попытка <b>' + (i + 1) + '</b> из <b>' + group.length +
+        '</b> (сообщение <code>' + escText(t.retry.messageId) + '</code>). Остальные: ' + list + '.'});
+    });
+  });
 }
 
 /* verdict + counters over a scoped slice of events/records — run once for the whole
@@ -3062,6 +3107,7 @@ function tabLabel(t){
               || String(ctx.nickname || '').trim();
   return {
     id: t.traceId,
+    repeat: t.retry ? t.retry.index + '/' + t.retry.total : '',
     q: q.length > 200 ? q.slice(0, 200) + '…' : q,
     cus: String(cus || '').trim(),
     fio: fio
@@ -3080,7 +3126,8 @@ function renderTabs(){
     '<span>Выгрузить уникальные traceId</span><span class="count">' + traceIds.length + '</span></button></div>' +
     STATE.traces.map((t, i) => {
     const l = tabLabel(t);
-    const full = [l.id, l.q, l.cus, l.fio].filter(Boolean).join(' - ');
+      const full = [l.id, l.repeat ? 'повтор ' + l.repeat : '', l.q, l.cus, l.fio]
+      .filter(Boolean).join(' - ');
     // the row is a pair of siblings, not nested buttons: the tab selects the trace,
     // the trailing one downloads it
     return '<div class="tabrow' + (i === STATE.active ? ' on' : '') + '">' +
@@ -3088,6 +3135,8 @@ function renderTabs(){
     '<span class="ttime">' + esc(fmtStamp(t.meta.from)) + '</span>' +
     '<span class="tmid">' +
       '<span class="tid">' + esc(l.id) + '</span>' +
+      (l.repeat ? '<span class="trep" title="одно и то же обращение, отправленное повторно">' +
+                  '↻ ' + esc(l.repeat) + '</span>' : '') +
       (l.q ? '<span class="tq">- ' + esc(l.q) + '</span>' : '') +
       (l.cus ? '<span class="tcus">- ' + esc(l.cus) + '</span>' : '') +
       (l.fio ? '<span class="tfio">- ' + esc(l.fio) + '</span>' : '') +
