@@ -372,6 +372,11 @@ table.raw tr:hover td{background:var(--paper)}
 .lvl-DEBUG,.lvl-TRACE{color:var(--muted)}
 
 .empty{padding:30px 0;color:var(--muted);font-size:14px;text-align:center}
+.note-box{
+  margin-top:12px;padding:10px 14px;border:1px solid var(--rule);border-radius:10px;
+  background:var(--paper-2);font-size:13px;color:var(--ink-soft);
+}
+.loadstatus{margin-top:14px;font-size:13.5px;color:var(--ink-soft);font-variant-numeric:tabular-nums}
 .err-box{
   border:1px solid var(--crimson);background:#fdeef3;color:var(--crimson);
   border-radius:3px;padding:12px 15px;margin-top:14px;font-size:13.5px;
@@ -2995,23 +3000,140 @@ drop.addEventListener('drop', e => { if(e.dataTransfer && e.dataTransfer.files) 
 drop.addEventListener('keydown', e => { if(e.key === 'Enter' || e.key === ' '){ e.preventDefault(); picker.click(); } });
 picker.addEventListener('change', () => loadFiles(picker.files));
 
+/* ---------- streaming loader ----------
+   A Kibana dump can run to gigabytes. Reading it with file.text() + JSON.parse() needs
+   the whole file as one string (V8 caps a string near 512M characters) plus the whole
+   object tree at once, plus a second copy kept for "Сохранить отчёт" — the tab dies with
+   Out of Memory long before 1 GB. So the file is read as a byte stream, the "logs"
+   array (or a bare top-level array, or Elasticsearch hits.hits) is found by a tiny
+   bracket/string scanner, and every record is JSON.parse'd on its own as soon as it
+   closes. Peak memory is the records themselves, nothing else. */
+const BIG_DUMP = 150 * 1048576;      // above this (all files together): lean mode
+// fields no part of the analyzer reads; on a big dump they are ~15% of every record
+const DEAD_FIELDS = ['app_host', 'pod_name', 'pod_id', '_index', '_score', '_ignored', '@version', '_p',
+  'logCollectorSystemLabel', 'namespace', 'app_version', 'file_name', 'line', 'thread', 'function'];
+function slimRecord(l){
+  if(!l || typeof l !== 'object') return l;
+  for(const k in l){
+    const v = l[k];
+    if(v === null || v === '' || DEAD_FIELDS.indexOf(k) >= 0) delete l[k];
+  }
+  return l;
+}
+async function streamLogs(file, onProgress){
+  const reader = file.stream().getReader();
+  const dec = new TextDecoder('utf-8');
+  const logs = [];
+  let depth = 0, inStr = false, esc = false;
+  let target = -1, hitsShape = false, finished = false;
+  let inEl = false, elStart = -1, carry = '';
+  let strStart = -1, lastStr = '', keyCarry = '';
+  const keys = [], types = [];
+  let read = 0, bad = 0, lastTick = 0;
+  const emit = text => {
+    let o;
+    try { o = JSON.parse(text); } catch(e){ bad++; return; }
+    if(hitsShape && o && o._source) o = Object.assign({}, o._source, {_id: o._id});
+    logs.push(o);
+  };
+  const scan = s => {
+    const n = s.length;
+    for(let i = 0; i < n; i++){
+      const c = s.charCodeAt(i);
+      if(inStr){
+        if(esc) esc = false;
+        else if(c === 92) esc = true;
+        else if(c === 34){
+          inStr = false;
+          if(strStart >= 0){ lastStr = keyCarry + s.slice(strStart, i); strStart = -1; keyCarry = ''; }
+        }
+        continue;
+      }
+      if(c === 34){ inStr = true; strStart = (target < 0 && depth <= 2) ? i + 1 : -1; continue; }
+      if(target < 0 && c === 58){ keys[depth] = lastStr; continue; }
+      if(c === 123 || c === 91){
+        if(depth === target && !inEl){ inEl = true; elStart = i; }
+        depth++; types[depth] = c;
+        if(target < 0 && c === 91){
+          if(depth === 1) target = 1;
+          else if(depth === 2 && types[1] === 123 && keys[1] === 'logs') target = 2;
+          else if(depth === 3 && keys[1] === 'hits' && keys[2] === 'hits'){ target = 3; hitsShape = true; }
+        }
+        continue;
+      }
+      if(c === 125 || c === 93){
+        depth--;
+        if(inEl && depth === target){
+          emit(carry ? carry + s.slice(0, i + 1) : s.slice(elStart, i + 1));
+          carry = ''; inEl = false; elStart = -1;
+        } else if(target >= 0 && depth < target){ finished = true; return; }
+      }
+    }
+    if(inEl){ carry += elStart >= 0 ? s.slice(elStart) : s; elStart = -1; }
+    // a top-level key cut by the chunk edge: keep its head and go on reading it
+    if(inStr && strStart >= 0){ keyCarry += s.slice(strStart); strStart = 0; }
+  };
+  for(;;){
+    const r = await reader.read();
+    if(r.done) break;
+    read += r.value.byteLength;
+    if(!finished){
+      scan(dec.decode(r.value, {stream: true}));
+    }
+    const now = Date.now();
+    if(onProgress && now - lastTick > 150){ lastTick = now; onProgress(read); await new Promise(res => setTimeout(res, 0)); }
+    if(finished){ try { reader.cancel(); } catch(e){} break; }
+  }
+  if(target < 0) return null;
+  return {logs: logs, bad: bad};
+}
+
+const fmtSize = b => b < 1048576 ? (b / 1024).toFixed(0) + ' КБ' :
+  b < 1073741824 ? (b / 1048576).toFixed(0) + ' МБ' : (b / 1073741824).toFixed(2).replace('.', ',') + ' ГБ';
+function setStatus(html){
+  let el = $('#loadstatus');
+  if(!el){
+    el = document.createElement('div'); el.id = 'loadstatus'; el.className = 'loadstatus';
+    const host = $('#fatal'); host.parentNode.insertBefore(el, host);
+  }
+  el.innerHTML = html || '';
+  el.style.display = html ? '' : 'none';
+}
+const nextFrame = () => new Promise(res => setTimeout(res, 30));
+
 async function loadFiles(list){
   const files = Array.from(list || []);
   if(!files.length) return;
   $('#fatal').innerHTML = '';
+  const totalBytes = files.reduce((a, f) => a + f.size, 0);
+  const lean = totalBytes > BIG_DUMP;
   const entries = [], broken = [], raw = [];
+  let doneBytes = 0, badRecs = 0;
   for(const f of files){
     try{
-      const txt = await f.text();
-      const parsed = JSON.parse(txt);
-      const norm = normalizeFile(parsed);
-      if(!norm){ broken.push({name: f.name, why: 'не найден массив logs'}); continue; }
-      entries.push({name: f.name, logs: norm.logs, url: norm.url});
-      raw.push({name: f.name, json: parsed});   // keep the source for "Сохранить отчёт"
+      const res = await streamLogs(f, got => setStatus(
+        'Читаю <b>' + esc(f.name) + '</b>: ' + fmtSize(doneBytes + got) + ' из ' + fmtSize(totalBytes) +
+        ' (' + Math.floor((doneBytes + got) / Math.max(totalBytes, 1) * 100) + '%)'));
+      doneBytes += f.size;
+      if(!res){ broken.push({name: f.name, why: 'не найден массив logs'}); continue; }
+      badRecs += res.bad;
+      // the originals are what "Сохранить отчёт" and the per-trace export write back;
+      // on a big dump there is no keeping a second copy, so both work off the records
+      const logs = res.logs.map(l => {
+        const o = liftRecord(l);
+        return lean ? slimRecord(o === l ? o : Object.assign({}, o)) : o;
+      });
+      entries.push({name: f.name, logs: logs, url: ''});
+      if(!lean) raw.push({name: f.name, json: {url: '', logs: res.logs}});
+      res.logs = null;
     }catch(err){
+      doneBytes += f.size;
       broken.push({name: f.name, why: 'файл не разбирается как JSON'});
     }
   }
+  const recCount = entries.reduce((a, e) => a + e.logs.length, 0);
+  setStatus('Разбираю ' + recCount.toLocaleString('ru-RU') + ' записей по трейсам…');
+  await nextFrame();
   STATE.raw = raw;
   STATE.brokenFiles = broken.slice();
   if(!entries.length){
@@ -3019,15 +3141,27 @@ async function loadFiles(list){
     renderFiles(broken.map(b => ({name: b.name, bad: b.why})));
     return;
   }
-  const built = buildTraces(entries);
+  let built;
+  try { built = buildTraces(entries); }
+  catch(err){
+    setStatus('');
+    $('#fatal').innerHTML = '<div class="err-box">Не удалось разобрать выгрузку: ' + esc(err && err.message || err) + '</div>';
+    return;
+  }
   STATE.traces = built.traces;
   STATE.files = built.files;
   STATE.active = built.active;
+  STATE.lean = lean;
+  setStatus('');
   renderFiles(built.files.concat(broken.map(b => ({name: b.name, bad: b.why}))));
   renderTabs();
   renderReport();
+  const notes = [];
+  if(lean) notes.push('Большая выгрузка (' + fmtSize(totalBytes) + '): загружена в экономном режиме — пустые и служебные поля записей отброшены, «Сохранить отчёт» отключён (такой отчёт не открылся бы в браузере). Выгрузка логов отдельного traceId работает.');
+  if(badRecs) notes.push('Не разобрано записей: ' + badRecs.toLocaleString('ru-RU') + ' (битый JSON внутри массива).');
+  if(notes.length) $('#fatal').innerHTML = notes.map(t => '<div class="note-box">' + esc(t) + '</div>').join('');
   if(broken.length){
-    $('#fatal').innerHTML = '<div class="err-box">Пропущено файлов: ' + broken.length + '. Проверьте, что это выгрузки Kibana в JSON.</div>';
+    $('#fatal').innerHTML += '<div class="err-box">Пропущено файлов: ' + broken.length + '. Проверьте, что это выгрузки Kibana в JSON.</div>';
   }
   $('#report').scrollIntoView({behavior: 'smooth', block: 'start'});
 }
