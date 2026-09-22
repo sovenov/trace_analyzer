@@ -542,6 +542,18 @@ body{background:var(--ground);letter-spacing:.01em}
 .stat .v{font-size:25px;font-weight:500;color:var(--ink)}
 .stat .k{font-size:10px;font-weight:600;letter-spacing:.09em}
 .stat.hl{border-color:#F2B8B5;background:#FFF8F7}
+.stat .sub{font-size:11px;color:var(--muted);margin-top:4px;font-variant-numeric:tabular-nums}
+.tokrow{display:flex;flex-wrap:wrap;gap:10px 22px;margin-top:14px}
+.tokgroup{flex:2 1 280px;min-width:0}
+.tokgroup.all{flex-grow:3}
+.tokgroup .stats-cap{font-size:10.5px;font-weight:600;text-transform:uppercase;letter-spacing:.09em;color:var(--muted)}
+.tokgroup .stats{margin-top:6px}
+.tokgroup.all .stat{background:transparent;border-style:dashed;box-shadow:none}
+.stat.jump{cursor:pointer}
+.stat.jump:hover{border-color:var(--navy)}
+.stat.jump .sub{overflow-wrap:anywhere}
+.row.flash .inner{animation:rowflash 1.6s ease-out}
+@keyframes rowflash{0%,40%{background:#FEF7E0}100%{background:transparent}}
 .stat.hl .v{color:var(--crimson)}
 
 .section{margin-top:36px}
@@ -1789,6 +1801,12 @@ function markRetries(traces){
   });
 }
 
+/* tokens spent on one model turn: total_tokens, or its parts when only those were logged */
+function tokensOf(e){
+  const u = e.usage || {};
+  return u.total_tokens || ((u.prompt_tokens || 0) + (u.completion_tokens || 0));
+}
+
 /* verdict + counters over a scoped slice of events/records — run once for the whole
    trace and again per user request, so each request gets its own findings and stats */
 function summarize(evs, rcs, ctx){
@@ -1807,6 +1825,8 @@ function summarize(evs, rcs, ctx){
   const finalAnswer = ctx.finalAnswer, delivered = ctx.delivered;
   const errs = ctx.errs || [];
   const errTotal = errs.reduce((a, g) => a + g.count, 0);
+  const tokEvs = evs.filter(e => e.kind === 'llm' && tokensOf(e) > 0);
+  const maxEv = tokEvs.reduce((m, e) => (!m || tokensOf(e) > tokensOf(m)) ? e : m, null);
 
   const findings = [];
   if(!ctx.userQ) findings.push({level: 'note', text: 'Текст запроса пользователя в этих файлах не найден — возможно, не хватает более ранней страницы выгрузки.'});
@@ -1892,7 +1912,14 @@ function summarize(evs, rcs, ctx){
       rag: ragHits.reduce((a, e) => a + e.chunks, 0),
       llm: evs.filter(e => e.kind === 'llm').length,
       subs: subCalls.length,
-      seconds: ctx.seconds
+      seconds: ctx.seconds,
+      tokens: tokEvs.reduce((a, e) => a + tokensOf(e), 0),
+      tokIn: tokEvs.reduce((a, e) => a + (e.usage.prompt_tokens || 0), 0),
+      tokOut: tokEvs.reduce((a, e) => a + (e.usage.completion_tokens || 0), 0),
+      tokTurns: tokEvs.length,
+      tokMax: maxEv ? {tokens: tokensOf(maxEv), tokIn: maxEv.usage.prompt_tokens || 0,
+                       tokOut: maxEv.usage.completion_tokens || 0, title: maxEv.title || '',
+                       model: maxEv.model || '', rel: maxEv.rel, ts: maxEv.ts} : null
     }
   };
 }
@@ -2536,11 +2563,24 @@ function buildOne(traceId, recs){
   // twice by the same service are two real turns.
   const SRC_RANK = {java: 0, rest: 1, ask: 2};
   const llmTurns = events.filter(e => e.kind === 'llm');
+  // masking can still make two copies of one turn read differently past the first few
+  // hundred characters; an identical prompt/completion/total token triple settles it
+  const sameUsage = (a, b) => {
+    const x = a.usage || {}, y = b.usage || {};
+    return x.total_tokens > 0 && x.total_tokens === y.total_tokens &&
+           x.prompt_tokens === y.prompt_tokens && x.completion_tokens === y.completion_tokens;
+  };
+  const twinOf = (o, e) => o !== e && SRC_RANK[o.src] < SRC_RANK[e.src] &&
+    Math.abs(o.ts - e.ts) < 60000 && (o.contentKey === e.contentKey || sameUsage(o, e));
+  // the kept copy inherits token counts from a dropped twin when it logged none itself
+  llmTurns.forEach(e => {
+    if(e.usage && e.usage.total_tokens) return;
+    const w = llmTurns.find(o => twinOf(e, o) && o.usage && o.usage.total_tokens);
+    if(w) e.usage = Object.assign({}, w.usage);
+  });
   const seenKeys = new Set();
   let clean = events.filter(e => {
-    if(e.kind === 'llm' && llmTurns.some(o =>
-         o !== e && SRC_RANK[o.src] < SRC_RANK[e.src] &&
-         o.contentKey === e.contentKey && Math.abs(o.ts - e.ts) < 60000)) return false;
+    if(e.kind === 'llm' && llmTurns.some(o => twinOf(o, e))) return false;
     if(!e.dedupeKey) return true;
     if(seenKeys.has(e.dedupeKey)) return false;
     seenKeys.add(e.dedupeKey);
@@ -3224,7 +3264,28 @@ function renderReport(){
     '<div class="verdict"><div class="verdict-head">Что произошло</div>' +
     f.map(x => '<div class="finding ' + x.level + '"><span class="dot"></span><div>' + x.text + '</div></div>').join('') +
     '</div>';
-  const statsHtml = st => '<div class="stats">' + [
+  const fmtN = n => Math.round(n).toLocaleString('ru-RU');
+  const statCard = s => '<div class="stat ' + s[2] + '"' + (s[4] ? ' title="' + esc(s[4]) + '"' : '') + (s[5] ? ' ' + s[5] : '') + '>' +
+    '<div class="v">' + esc(s[1]) + '</div><div class="k">' + esc(s[0]) + '</div>' +
+    (s[3] ? '<div class="sub">' + esc(s[3]) + '</div>' : '') + '</div>';
+  const tokCards = st => st.tokTurns ? [
+    ['токенов всего', fmtN(st.tokens), '', 'вход ' + fmtN(st.tokIn) + ' · выход ' + fmtN(st.tokOut),
+     'Сумма total_tokens по всем ходам LLM этого traceId'],
+    ['токенов на ход LLM', fmtN(st.tokens / st.tokTurns), '', 'среднее по ' + st.tokTurns + ' ход.',
+     'Сумма токенов, делённая на число ходов LLM с известными токенами'],
+    ['самый большой ход LLM', fmtN(st.tokMax.tokens), 'jump',
+     (st.tokMax.title ? st.tokMax.title + ' · ' : '') + fmtRel(st.tokMax.rel || 0) +
+       ' · вход ' + fmtN(st.tokMax.tokIn) + ' · выход ' + fmtN(st.tokMax.tokOut),
+     'Самый дорогой по токенам вызов модели в этом traceId' + (st.tokMax.model ? ' (' + st.tokMax.model + ')' : '') +
+       '. Нажмите, чтобы перейти к нему в хронике', 'data-jump-ts="' + st.tokMax.ts + '"']
+  ] : [
+    ['токенов всего', '—', '', 'в логах нет usage'],
+    ['токенов на ход LLM', '—', '', ''],
+    ['самый большой ход LLM', '—', '', '']
+  ];
+  const tokGroup = (cap, cards) => '<div class="tokgroup"><div class="stats-cap">' + esc(cap) + '</div>' +
+    '<div class="stats">' + cards.map(statCard).join('') + '</div></div>';
+  const statsHtml = (st, label) => '<div class="stats">' + [
     ['зап. в трейсе', st.records, ''],
     ['ходов LLM', st.llm, ''],
     ['саб-агентов', st.subs, ''],
@@ -3232,7 +3293,40 @@ function renderReport(){
     ['ходов в core', st.core || 0, ''],
     ['чанков RAG', st.rag, ''],
     ['секунд', st.seconds.toFixed(1), '']
-  ].map(s => '<div class="stat ' + s[2] + '"><div class="v">' + esc(s[1]) + '</div><div class="k">' + esc(s[0]) + '</div></div>').join('') + '</div>';
+  ].map(statCard).join('') + '</div>' +
+    '<div class="tokrow">' + tokGroup('Токены · ' + (label || 'этот traceId'), tokCards(st)) + allTokHtml + '</div>';
+
+  // the same token counters over every traceId loaded — a yardstick for this one
+  function allTokOf(){
+    const all = STATE.traces.map(t => t.stats || {});
+    const withTok = all.filter(st => st.tokTurns > 0);
+    const sum = withTok.reduce((a, st) => a + st.tokens, 0);
+    const turns = withTok.reduce((a, st) => a + st.tokTurns, 0);
+    const cap = 'Токены · все traceId (' + all.length + ')' +
+      (withTok.length !== all.length ? ' (с токенами — ' + withTok.length + ')' : '');
+    // the single most expensive model turn across every loaded traceId, and whose it was
+    let top = null, topTrace = -1;
+    STATE.traces.forEach((t, i) => {
+      const mx = t.stats && t.stats.tokMax;
+      if(mx && (!top || mx.tokens > top.tokens)){ top = mx; topTrace = i; }
+    });
+    const topId = topTrace >= 0 ? STATE.traces[topTrace].traceId : '';
+    const cards = withTok.length ? [
+      ['токенов всего', fmtN(sum), '', 'вход ' + fmtN(withTok.reduce((a, st) => a + st.tokIn, 0)) +
+        ' · выход ' + fmtN(withTok.reduce((a, st) => a + st.tokOut, 0)),
+       'Сумма токенов по всем traceId'],
+      ['в среднем на traceId', fmtN(sum / withTok.length), '', 'по суммам, ÷ ' + withTok.length + ' traceId',
+       'Среднее по суммам: сколько токенов в среднем уходит на один traceId (traceId без ходов LLM не учитываются)'],
+      ['в среднем на ход LLM', fmtN(sum / turns), '', 'по ' + turns + ' ход.',
+       'Сумма токенов по всем traceId, делённая на общее число ходов LLM'],
+      ['самый большой ход LLM', fmtN(top.tokens), 'jump',
+       'traceId ' + topId + (top.title ? ' · ' + top.title : ''),
+       'Самый дорогой по токенам вызов модели среди всех traceId: ' + topId +
+         ' (вход ' + fmtN(top.tokIn) + ' · выход ' + fmtN(top.tokOut) + '). Нажмите, чтобы открыть этот трейс',
+       'data-jump-trace="' + topTrace + '" data-jump-ts="' + top.ts + '"']
+    ] : [['токенов всего', '—', '', 'в логах нет usage']];
+    return tokGroup(cap, cards).replace('class="tokgroup"', 'class="tokgroup all"');
+  }
   /* The answer as the user saw it, except for the pieces that were not prose: a chip row
      and an instrument card are things we only describe. Mark those so nobody reads
      "[карточка] …" as something the assistant actually wrote, and let them open to the
@@ -3300,7 +3394,8 @@ function renderReport(){
                   (hasEnd ? '<span class="to">' + esc(fmtAbs(sp.end)) + '</span>' : '') +
                   '</div></div>';
 
-    return '<div class="row' + (e.minor ? ' minor' : '') + '" data-seg="' + segOf(e.ts) + '">' + clock +
+    return '<div class="row' + (e.minor ? ' minor' : '') + '" data-seg="' + segOf(e.ts) + '"' +
+           (e.kind === 'llm' ? ' data-llm-ts="' + e.ts + '"' : '') + '>' + clock +
            '<div class="body d' + e.depth + '" style="--ind:' + ind + 'px"><div class="inner">' + inner + '</div></div>' +
            '<div class="track">' + bar + '</div></div>';
   }).join('');
@@ -3327,8 +3422,9 @@ function renderReport(){
   const verdictBlock = multiQ
     ? seg('all', verdictHtml(tr.findings)) + segs.map(s => seg(s.index, verdictHtml(s.findings))).join('')
     : verdictHtml(tr.findings);
+  const allTokHtml = allTokOf();
   const statsBlock = multiQ
-    ? seg('all', statsHtml(tr.stats)) + segs.map(s => seg(s.index, statsHtml(s.stats))).join('')
+    ? seg('all', statsHtml(tr.stats)) + segs.map(s => seg(s.index, statsHtml(s.stats, 'запрос №' + (s.index + 1)))).join('')
     : statsHtml(tr.stats);
   const answerBlock = multiQ
     ? seg('all', answerHtml(tr.finalAnswer, tr.answerParts)) +
@@ -3504,6 +3600,26 @@ function renderReport(){
   wireChronicle();
   wireFolds();
   wireRaw(tr);
+  wireTokJump();
+}
+
+/* "самый большой ход LLM" cards: open the owning trace if needed, then scroll to that
+   model turn in the chronicle and flash it */
+function wireTokJump(){
+  document.querySelectorAll('.stat.jump').forEach(card => card.onclick = () => {
+    const ti = card.dataset.jumpTrace, ts = card.dataset.jumpTs;
+    if(ti != null && +ti !== STATE.active){
+      STATE.active = +ti; renderTabs(); renderReport();
+    }
+    const row = document.querySelector('#spine .row[data-llm-ts="' + ts + '"]');
+    if(!row) return;
+    if(row.classList.contains('hidden')){
+      const tab = document.querySelector('#segtabs .tab[data-seg="' + row.dataset.seg + '"]');
+      if(tab) tab.click();
+    }
+    row.scrollIntoView({behavior: 'smooth', block: 'center'});
+    row.classList.remove('flash'); void row.offsetWidth; row.classList.add('flash');
+  });
 }
 
 /* "раскрыть/свернуть все" over every payload fold in the chronicle — параметры запроса,
