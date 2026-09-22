@@ -552,7 +552,20 @@ body{background:var(--ground);letter-spacing:.01em}
 .tokgroup .stat{min-width:0}
 .tokgroup .stat .v{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .stat .sub.mono{font-family:var(--mono);font-size:11px;color:var(--ink-soft);overflow-wrap:anywhere}
+.szgrid{display:grid;grid-template-columns:44px repeat(4,minmax(0,1fr));gap:10px;margin-top:8px;align-items:stretch}
+.szlabel{font-family:var(--mono);font-size:11.5px;font-weight:600;color:var(--ink-soft);align-self:center}
+.szempty{grid-column:span 4;align-self:center;font-size:12.5px;color:var(--muted);
+  border:1px dashed var(--rule);border-radius:14px;padding:12px 16px}
+.szgrid .stat{min-width:0}
+.szgrid .stat .v{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.szgroup.all .stat{background:transparent;border-style:dashed;box-shadow:none}
 @media(max-width:960px){.tokgroup .stats{grid-template-columns:repeat(3,minmax(0,1fr))}}
+@media(max-width:640px){
+  .szgrid{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .szlabel{grid-column:1/-1;margin-top:4px}
+  .szempty{grid-column:1/-1}
+  .szpad{display:none}
+}
 @media(max-width:640px){.tokgroup .stats{grid-template-columns:repeat(2,minmax(0,1fr))}}
 .tokgroup.all .stat{background:transparent;border-style:dashed;box-shadow:none}
 .stat.jump{cursor:pointer}
@@ -1813,6 +1826,51 @@ function tokensOf(e){
   return u.total_tokens || ((u.prompt_tokens || 0) + (u.completion_tokens || 0));
 }
 
+/* content-length of what came back over HTTP, over a scoped slice of records.
+   MCP: langflow logs every MCP HTTP response as TransportResponse — initialize,
+   tools/list and the 202 notification acks included — but writes a ProtocolDiagnostic
+   (with the body's first bytes) only for a tools/call result, one per call. So the
+   diagnostic is the record that says "this many bytes of tool output". The tool's name
+   is not in it: it is taken from the "Response | <tool>" record that follows, matched by
+   the start of the result text.
+   LLM: httpx logs "HTTP Response: POST …/chat/completions … 'content-length': 'N'" —
+   present only on stacks that call the model from langflow directly. */
+function sizeKey(s){
+  const i = s.indexOf('"text":"');
+  return i < 0 ? '' : s.slice(i + 8, i + 400).replace(/\\+/g, '').replace(/[^0-9A-Za-zА-Яа-яЁё]+/g, '').slice(0, 60);
+}
+function extractSizes(rcs){
+  const mcp = [], llm = [], resp = [];
+  rcs.forEach(r => {
+    const m = r.msg || '';
+    if(m.indexOf('[MCP -> {http}] | ProtocolDiagnostic') === 0){
+      if(!/"result"\s*:\s*\{\s*"content"/.test(m)) return;
+      const c = /"content-length"\s*:\s*"(\d+)"/i.exec(m);
+      if(!c) return;
+      const bp = m.indexOf('body_prefix=');
+      mcp.push({bytes: +c[1], ts: r.ts, key: bp >= 0 ? sizeKey(m.slice(bp)) : ''});
+    } else if(m.indexOf('[MCP -> {http}] | Response |') === 0){
+      const n = /^\[MCP -> \{http\}\] \| Response \| ([^|]+?) \|/.exec(m);
+      const bi = m.indexOf('body=');
+      resp.push({ts: r.ts, name: n ? n[1].trim() : '', key: bi >= 0 ? sizeKey(m.slice(bi)) : ''});
+    } else if(/^HTTP Response: POST \S*chat\/completions/.test(m)){
+      const c = /'content-length'\s*:\s*'(\d+)'/i.exec(m);
+      if(c) llm.push({bytes: +c[1], ts: r.ts});
+    }
+  });
+  mcp.forEach(x => {
+    const near = resp.filter(y => y.ts >= x.ts - 5 && y.ts - x.ts < 120000);
+    const hit = near.find(y => x.key && y.key === x.key) || near[0];
+    if(hit) x.tool = hit.name;
+  });
+  const agg = (xs, extra) => {
+    const top = xs.reduce((a, x) => (!a || x.bytes > a.bytes) ? x : a, null);
+    return {bytes: xs.reduce((a, x) => a + x.bytes, 0), n: xs.length,
+            max: top ? Object.assign({bytes: top.bytes, ts: top.ts}, extra(top)) : null};
+  };
+  return {mcp: agg(mcp, x => ({tool: x.tool || ''})), llm: agg(llm, () => ({}))};
+}
+
 /* verdict + counters over a scoped slice of events/records — run once for the whole
    trace and again per user request, so each request gets its own findings and stats */
 function summarize(evs, rcs, ctx){
@@ -1923,6 +1981,7 @@ function summarize(evs, rcs, ctx){
       tokIn: tokEvs.reduce((a, e) => a + (e.usage.prompt_tokens || 0), 0),
       tokOut: tokEvs.reduce((a, e) => a + (e.usage.completion_tokens || 0), 0),
       tokTurns: tokEvs.length,
+      sizes: extractSizes(rcs),
       tokMax: maxEv ? {tokens: tokensOf(maxEv), tokIn: maxEv.usage.prompt_tokens || 0,
                        tokOut: maxEv.usage.completion_tokens || 0, title: maxEv.title || '',
                        model: maxEv.model || '', rel: maxEv.rel, ts: maxEv.ts} : null
@@ -3291,6 +3350,59 @@ function renderReport(){
     ['токенов на ход LLM', '—', '', ''],
     ['самый большой ход LLM', '—', '', '']
   ];
+  /* bytes as the eye reads them; exact count goes to the tooltip */
+  const fmtB = b => b < 1024 ? fmtN(b) + ' Б' :
+    b < 1048576 ? (b / 1024).toLocaleString('ru-RU', {maximumFractionDigits: 1}) + ' КБ' :
+    (b / 1048576).toLocaleString('ru-RU', {maximumFractionDigits: 2}) + ' МБ';
+  const t0 = tr.records[0] ? tr.records[0].ts : 0;
+  /* one labelled row of size cards: "MCP" / "LLM" on the left, cards in 4 columns */
+  const sizeRow = (label, cards, empty) => '<div class="szlabel">' + esc(label) + '</div>' +
+    (cards ? cards.map(statCard).join('') + '<div class="szpad"></div>'.repeat(Math.max(0, 4 - cards.length))
+           : '<div class="szempty">' + esc(empty) + '</div>');
+  const sizeGroup = (cap, rows, all) => '<div class="tokgroup szgroup' + (all ? ' all' : '') + '">' +
+    '<div class="stats-cap">' + esc(cap) + '</div><div class="szgrid">' + rows.join('') + '</div></div>';
+  const traceSizeCards = (z, what, kind) => z.n ? [
+    ['всего', fmtB(z.bytes), '', 'в ' + fmtN(z.n) + ' ответ.', fmtN(z.bytes) + ' байт'],
+    ['на ответ', fmtB(z.bytes / z.n), '', 'среднее по ' + fmtN(z.n) + ' ответ.', fmtN(Math.round(z.bytes / z.n)) + ' байт'],
+    ['самый большой ответ', fmtB(z.max.bytes), 'jump',
+     [z.max.tool || what, fmtRel((z.max.ts - t0) / 1000)],
+     fmtN(z.max.bytes) + ' байт. Нажмите, чтобы перейти к нему в хронике',
+     'data-jump-kind="' + kind + '" data-jump-ts="' + z.max.ts + '"']
+  ] : null;
+  const sizeHtml = (st, label) => {
+    const z = st.sizes || {mcp: {n: 0}, llm: {n: 0}};
+    return sizeGroup('Content-length ответов · ' + (label || 'этот traceId'), [
+      sizeRow('MCP', traceSizeCards(z.mcp, 'ответ инструмента', 'mcp'), 'вызовов инструментов с размером ответа нет'),
+      sizeRow('LLM', traceSizeCards(z.llm, 'ответ модели', 'llm'), 'размер ответов модели в этих логах не пишется')
+    ]);
+  };
+  function allSizeOf(){
+    const pick = k => {
+      let bytes = 0, n = 0, traces = 0, top = null, topTrace = -1;
+      STATE.traces.forEach((t, i) => {
+        const z = t.stats && t.stats.sizes && t.stats.sizes[k];
+        if(!z || !z.n) return;
+        bytes += z.bytes; n += z.n; traces++;
+        if(!top || z.max.bytes > top.bytes){ top = z.max; topTrace = i; }
+      });
+      if(!n) return null;
+      const id = STATE.traces[topTrace].traceId;
+      return [
+        ['всего', fmtB(bytes), '', 'в ' + fmtN(n) + ' ответ.', fmtN(bytes) + ' байт по всем traceId'],
+        ['в среднем на traceId', fmtB(bytes / traces), '', 'по суммам, ÷ ' + fmtN(traces) + ' traceId',
+         'Среднее по суммам (traceId без таких ответов не учитываются)'],
+        ['в среднем на ответ', fmtB(bytes / n), '', 'по ' + fmtN(n) + ' ответ.', fmtN(Math.round(bytes / n)) + ' байт'],
+        ['самый большой ответ', fmtB(top.bytes), 'jump',
+         [{text: id, cls: 'mono'}].concat(top.tool ? [top.tool] : []),
+         fmtN(top.bytes) + ' байт, traceId ' + id + '. Нажмите, чтобы открыть этот трейс',
+         'data-jump-trace="' + topTrace + '" data-jump-kind="' + k + '" data-jump-ts="' + top.ts + '"']
+      ];
+    };
+    return sizeGroup('Content-length ответов · все traceId · ' + fmtN(STATE.traces.length), [
+      sizeRow('MCP', pick('mcp'), 'вызовов инструментов с размером ответа нет'),
+      sizeRow('LLM', pick('llm'), 'размер ответов модели в этих логах не пишется')
+    ], true);
+  }
   const tokGroup = (cap, cards) => '<div class="tokgroup"><div class="stats-cap">' + esc(cap) + '</div>' +
     '<div class="stats">' + cards.map(statCard).join('') + '</div></div>';
   const statsHtml = (st, label) => '<div class="stats">' + [
@@ -3302,7 +3414,8 @@ function renderReport(){
     ['чанков RAG', st.rag, ''],
     ['секунд', st.seconds.toFixed(1), '']
   ].map(statCard).join('') + '</div>' +
-    '<div class="tokrow">' + tokGroup('Токены · ' + (label || 'этот traceId'), tokCards(st)) + allTokHtml + '</div>';
+    '<div class="tokrow">' + tokGroup('Токены · ' + (label || 'этот traceId'), tokCards(st)) + allTokHtml + '</div>' +
+    '<div class="tokrow">' + sizeHtml(st, label) + allSizeHtml + '</div>';
 
   // the same token counters over every traceId loaded — a yardstick for this one
   function allTokOf(){
@@ -3418,7 +3531,8 @@ function renderReport(){
                   '</div></div>';
 
     return '<div class="row' + (e.minor ? ' minor' : '') + '" data-seg="' + segOf(e.ts) + '"' +
-           (e.kind === 'llm' ? ' data-llm-ts="' + e.ts + '"' : '') + '>' + clock +
+           (e.kind === 'llm' ? ' data-llm-ts="' + e.ts + '"' : '') +
+           ' data-kind="' + e.kind + '" data-ts="' + e.ts + '">' + clock +
            '<div class="body d' + e.depth + '" style="--ind:' + ind + 'px"><div class="inner">' + inner + '</div></div>' +
            '<div class="track">' + bar + '</div></div>';
   }).join('');
@@ -3446,6 +3560,7 @@ function renderReport(){
     ? seg('all', verdictHtml(tr.findings)) + segs.map(s => seg(s.index, verdictHtml(s.findings))).join('')
     : verdictHtml(tr.findings);
   const allTokHtml = allTokOf();
+  const allSizeHtml = allSizeOf();
   const statsBlock = multiQ
     ? seg('all', statsHtml(tr.stats)) + segs.map(s => seg(s.index, statsHtml(s.stats, 'запрос №' + (s.index + 1)))).join('')
     : statsHtml(tr.stats);
@@ -3634,7 +3749,19 @@ function wireTokJump(){
     if(ti != null && +ti !== STATE.active){
       STATE.active = +ti; renderTabs(); renderReport();
     }
-    const row = document.querySelector('#spine .row[data-llm-ts="' + ts + '"]');
+    // token cards name the exact model turn; size cards name a moment, so take the
+    // closest chronicle row of that kind
+    const kind = card.dataset.jumpKind;
+    let row = null;
+    if(kind){
+      const kinds = kind === 'mcp' ? ['mcp', 'mcpwrap'] : [kind];
+      let best = Infinity;
+      document.querySelectorAll('#spine .row[data-kind]').forEach(r => {
+        if(kinds.indexOf(r.dataset.kind) < 0) return;
+        const d = Math.abs(+r.dataset.ts - +ts);
+        if(d < best){ best = d; row = r; }
+      });
+    } else row = document.querySelector('#spine .row[data-llm-ts="' + ts + '"]');
     if(!row) return;
     if(row.classList.contains('hidden')){
       const tab = document.querySelector('#segtabs .tab[data-seg="' + row.dataset.seg + '"]');
