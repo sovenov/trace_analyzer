@@ -321,7 +321,9 @@ pre.json{
   font-family:var(--mono);font-size:11.5px;line-height:1.5;
   background:var(--paper-2);border:1px solid var(--rule-soft);border-radius:2px;
   padding:10px 12px;margin:7px 0 0;overflow:auto;max-height:340px;
-  white-space:pre;color:var(--ink-soft);
+  /* long string values wrap instead of running off to the right; the indentation of the
+     wrapped part is kept by hanging it under the line it belongs to */
+  white-space:pre-wrap;overflow-wrap:anywhere;color:var(--ink-soft);
 }
 
 /* waterfall */
@@ -407,6 +409,14 @@ table.raw tr:hover td{background:var(--paper)}
 .bhow summary{cursor:pointer;color:var(--navy)}
 .bhow li{margin:6px 0;line-height:1.5;max-width:980px}
 @media(max-width:900px){.bstats{grid-template-columns:repeat(2,minmax(0,1fr))}}
+.paymark{
+  margin-left:8px;font-family:var(--sans);font-size:10px;font-weight:600;text-transform:uppercase;
+  letter-spacing:.06em;color:var(--muted);border:1px solid var(--rule);border-radius:999px;padding:1px 7px;
+}
+pre.json.loose{border-left:2px solid var(--rule)}
+.tab .tlinked{display:inline-block;margin-right:10px;font-family:var(--mono);font-size:11px;color:var(--navy);
+  border:1px solid var(--rule);border-radius:999px;padding:0 7px;white-space:nowrap}
+.idcell dd{white-space:pre-line}
 .note-box{
   margin-top:12px;padding:10px 14px;border:1px solid var(--rule);border-radius:10px;
   background:var(--paper-2);font-size:13px;color:var(--ink-soft);
@@ -840,6 +850,8 @@ function safeJson(txt){
   if(!txt) return null;
   let t = String(txt).trim();
   t = t.replace(/:\s*\*MASKED_[A-Z_]+\*/g, ': "\u2039masked\u203a"');
+  // epoch timestamps get blanked into a bare run of asterisks ("startPeriod":**********)
+  t = t.replace(/:\s*\*{3,}(?=\s*[,}\]])/g, ': "\u2039masked\u203a"');
   try { return JSON.parse(t); } catch(e){}
   try { return JSON.parse(t.replace(/,\s*([}\]])/g, '$1')); } catch(e){}
   return null;
@@ -943,9 +955,16 @@ function liftRecord(l){
   // the trace they fetch is a query parameter of the url the http client logged
   const collectorTrace = (!langfuseTrace && rawMsg.indexOf('param_trace_id=') >= 0)
     ? (/param_trace_id=([0-9a-f]{32})/i.exec(rawMsg) || [])[1] || null : null;
+  // the data-masking service reports on a whole trace, and names it in attributes.trace;
+  // pymongo's DEBUG echo of a langflow job update carries no trace fields of its own, but
+  // the job document it prints holds the W3C traceparent of the run
+  const attrTrace = /^[0-9a-f]{32}$/i.test(String(val(l['attributes.trace']) || '')) ? val(l['attributes.trace']) : null;
+  const replyTrace = (typeof l.reply === 'string' && l.reply.indexOf('traceparent') >= 0)
+    ? (/"traceparent"\s*:\s*"00-([0-9a-f]{32})-/i.exec(l.reply) || [])[1] || null : null;
   const traceId = langfuseTrace || collectorTrace ||
                   pick('traceId', 'trace_id', 'envoy.traceId', 'envoy.trace_id') ||
-                  from('traceId') || from('trace_id') || requestTrace || coreTrace;
+                  from('traceId') || from('trace_id') || requestTrace || coreTrace ||
+                  attrTrace || replyTrace;
   const appId = pick('app_id', 'resource.service_name', 'resource.k8s_container_name', 'envoy.service') || coreApp;
   // an istio access log has no message of its own — state the hop it recorded
   const accessMethod = (!hasEnvoyMsg && !env) ? pick('envoy.method', 'method') : null;
@@ -1584,6 +1603,18 @@ function extractFinalAnswer(msg, app){
     const m = /LangFlowResponse\[sessionId=([^,]*), text=([\s\S]*)\]\s*$/.exec(msg);
     if(m) return {session: m[1], text: m[2]};
   }
+  // async stack, callback flavour: langflow reports every bubble back to queue-keeper
+  // ("AI Flow callback received … type='ADD_MESSAGE', requestBody='{…assembly…}'"). The
+  // "thinking" bubbles are type intermediate; the answer is the one with real content.
+  if(msg.indexOf('AI Flow callback received') === 0 && msg.indexOf("type='ADD_MESSAGE'") >= 0){
+    const at = msg.indexOf('{"type":"assembly"');
+    if(at < 0) return null;
+    const txt = balanced(msg, at).text;
+    if(!/"type"\s*:\s*"(message|asset|lineChart)"/.test(txt)) return null;
+    const id = /messageId='([^']*)'/.exec(msg);
+    const s = /sessionId='([^']*)'/.exec(msg);
+    return {session: s && s[1], messageId: id && id[1], text: txt};
+  }
   // async stack: comod-adapter posts the answer to the channel. The same call carries
   // intermediate "thinking" bubbles too — only status REPLY is the real answer.
   if((msg.indexOf('COMOD answer send request') >= 0 ||
@@ -1651,6 +1682,14 @@ function answerParts(txt, depth){
       }
       // an instrument widget: the user saw a card, not a sentence. Name it, so the
       // answer does not quietly lose a bubble that was on the screen.
+      else if(n.type === 'lineChart' && n.body){
+        const pts = Array.isArray(n.body.children) ? n.body.children.length : 0;
+        const fmt = n.body.yAxis && n.body.yAxis.format && n.body.yAxis.format.currency;
+        parts.push({kind: 'chart', node: n,
+                    text: [n.body.chartDataType || 'линейный график', pts ? pts + ' точек' : '', fmt || '']
+                          .filter(Boolean).join(' · ')});
+        return;       // its points are not bubbles
+      }
       else if(n.type === 'asset' && n.body && (n.body.title || n.body.subtitle)){
         parts.push({kind: 'asset', node: n,
                     text: [n.body.title, n.body.subtitle].filter(Boolean).join(' · ')});
@@ -1668,7 +1707,7 @@ function answerParts(txt, depth){
 function partsToText(parts){
   if(!parts) return '';
   const body = parts.filter(p => p.kind !== 'chips')
-    .map(p => p.kind === 'asset' ? '[карточка] ' + p.text : p.text).join('\n\n');
+    .map(p => p.kind === 'asset' ? '[карточка] ' + p.text : p.kind === 'chart' ? '[график] ' + p.text : p.text).join('\n\n');
   const chips = parts.filter(p => p.kind === 'chips').map(p => p.text).join(' · ');
   return body + (chips ? (body ? '\n\n' : '') + 'Кнопки: ' + chips : '');
 }
@@ -1687,6 +1726,16 @@ function extractDelivery(msg){
     const s = /sessionId='([^']*)'/.exec(msg);
     const u = /userId='([^']*)'/.exec(msg);
     return {kind: 'sent', session: s && s[1], userId: u && u[1]};
+  }
+  // newer comod-adapter: "COMOD answer send succeeded [originalMessageId=…, …, httpStatus=200]".
+  // One per bubble, thinking ones included — the caller counts only a send made after
+  // the final answer was seen.
+  if(msg.indexOf('COMOD answer send succeeded') === 0){
+    const id = /originalMessageId='([^']*)'/.exec(msg);
+    const code = /httpStatus=(\d+)/.exec(msg);
+    if(code && !/^2/.test(code[1])) return null;
+    const ch = /channel='([^']*)'/.exec(msg);
+    return {kind: 'sent', messageId: id && id[1], channel: ch && ch[1], afterAnswer: true};
   }
   // async stack. Fires for every intermediate bubble as well, so the messageId is
   // reported and the caller keeps only the one matching the final answer.
@@ -1794,6 +1843,7 @@ function buildTraces(fileEntries){
     });
   });
   all.sort((a, b) => a.ts - b.ts);
+  linkTraces(all);
 
   const groups = new Map();
   all.forEach(r => {
@@ -1820,6 +1870,106 @@ function buildTraces(fileEntries){
   });
 
   return {traces: traces, files: ordered, total: all.length, active: active};
+}
+
+/* One user question can be spread over several traceIds, because a few hops start a
+   trace of their own instead of continuing the caller's:
+     · strategy-api hands the question to langflow ("Request to LangFlow: … sessionId=S")
+       and the flow run arrives at langflow as a fresh trace, whose request body carries
+       "session_id": "S";
+     · every model call langflow makes through the gateway ("[ASK LLM] Request … messageId
+       M") runs gateway → transformation → strategy → java-functions → llm-integration
+       under a new traceId, and every hop of it logs M.
+   Left alone, each of those is a tab of its own with no question and no context — the
+   chain the analyst is looking for is cut into pieces. So children are folded into the
+   trace that started them (transitively: a model call of a flow run lands in the trace
+   of the question). Each record keeps the id it was logged under in origTrace, and the
+   trace lists what it was assembled from. */
+const UUID_RE = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i;
+function linkTraces(all){
+  const askParent = new Map();          // messageId of an [ASK LLM] call -> trace that made it
+  const flowCalls = [];                 // {session, ts, trace} of "Request to LangFlow"
+  const info = new Map();               // trace -> {ids, runs}
+  all.forEach(r => {
+    if(r.traceId === NO_TRACE) return;
+    const m = r.msg;
+    let g = info.get(r.traceId);
+    if(!g){ g = {ids: new Set(), runs: []}; info.set(r.traceId, g); }
+    if(m.indexOf('[ASK LLM] Request') === 0){
+      const id = String(r.raw.messageId || (/'messageId':\s*'([^']+)'/.exec(m) || [])[1] || '');
+      if(UUID_RE.test(id)) askParent.set(id.toLowerCase(), r.traceId);
+      return;
+    }
+    if(m.indexOf('Request to LangFlow') >= 0){
+      const sid = /sessionId=([0-9a-zA-Z-]{12,})/.exec(m);
+      if(sid) flowCalls.push({session: sid[1], ts: r.ts, trace: r.traceId});
+    }
+    if(/^\[ACCESS\] -> Request POST \/api\/v\d+\/run\//.test(m)){
+      const sid = /"session_id"\s*:\s*"([^"]+)"/.exec(m);
+      if(sid) g.runs.push({session: sid[1], ts: r.ts});
+    }
+    const own = r.raw.messageId || r.raw.message_id;
+    if(own && UUID_RE.test(String(own))) g.ids.add(String(own).toLowerCase());
+    const inMsg = /message_?[iI]d\s*[=:]\s*["']?([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/.exec(m);
+    if(inMsg) g.ids.add(inMsg[1].toLowerCase());
+  });
+  if(!askParent.size && !flowCalls.length) return;
+
+  const parent = new Map();
+  info.forEach((g, t) => {
+    for(const id of g.ids){
+      const p = askParent.get(id);
+      if(p && p !== t){ parent.set(t, {to: p, why: 'llm', key: id}); return; }
+    }
+    for(const run of g.runs){
+      let best = null, bd = Infinity;
+      flowCalls.forEach(c => {
+        if(c.session !== run.session || c.trace === t) return;
+        const d = run.ts - c.ts;                  // the run follows the hand-off
+        if(d < -2000 || d > 30000) return;
+        if(Math.abs(d) < bd){ bd = Math.abs(d); best = c; }
+      });
+      if(best){ parent.set(t, {to: best.trace, why: 'flow'}); return; }
+    }
+  });
+  if(!parent.size) return;
+  const rootOf = t => {
+    const seen = new Set();
+    while(parent.has(t) && !seen.has(t)){ seen.add(t); t = parent.get(t).to; }
+    return t;
+  };
+  all.forEach(r => {
+    const link = parent.get(r.traceId);
+    if(!link) return;
+    r.origTrace = r.traceId;
+    r.linkWhy = link.why;
+    if(link.key) r.linkKey = link.key;
+    r.traceId = rootOf(r.traceId);
+  });
+}
+
+/* the traceIds folded into this one by linkTraces, with what each of them was */
+function linkedOf(recs, evs){
+  const m = new Map();
+  recs.forEach(r => {
+    if(!r.origTrace) return;
+    let g = m.get(r.origTrace);
+    if(!g){
+      g = {traceId: r.origTrace, why: r.linkWhy, key: r.linkKey || null, count: 0, from: r.ts, what: ''};
+      m.set(r.origTrace, g);
+    }
+    g.count++;
+  });
+  // a model call is named the way the chronicle names that turn (Проверка безопасности,
+  // Переформулировка запроса, …) — found by the messageId both sides carry
+  const out = Array.from(m.values());
+  out.forEach(g => {
+    if(g.why === 'flow'){ g.what = 'запуск флоу в langflow'; return; }
+    const ev = (evs || []).find(e => e.kind === 'llm' && e.messageId &&
+                                     String(e.messageId).toLowerCase() === g.key);
+    g.what = ev ? 'вызов модели: ' + ev.title : 'вызов модели';
+  });
+  return out.sort((a, b) => a.from - b.from);
 }
 
 /* One message sent more than once is not several conversations: a request that was
@@ -2218,6 +2368,11 @@ function buildOne(traceId, recs){
       }
     }
     const ctx = (app === 'alfagen-strategy-api' && msg.indexOf('Incoming request') >= 0) ? extractContext(msg) : null;
+    // the async entry point names the client by pin only
+    if(app.indexOf('comod-adapter') >= 0 && msg.indexOf('Inbound COMOD request received') === 0){
+      const pin = /xpin=([A-Z0-9]{4,})/.exec(msg);
+      if(pin){ meta.ctx = meta.ctx || {}; if(!meta.ctx.cus) meta.ctx.cus = pin[1]; }
+    }
     if(ctx) meta.ctx = Object.assign(meta.ctx || {}, ctx);
 
     // --- available MCP tools
@@ -2421,6 +2576,7 @@ function buildOne(traceId, recs){
       // the async stack reports a send for every intermediate bubble too — only the
       // one carrying the final answer's messageId is the delivery we care about
       if(dl.kind === 'sent' && dl.messageId && dl.messageId !== answerMsgId){ /* intermediate */ }
+      else if(dl.afterAnswer && delivered){ /* already confirmed for this answer */ }
       else if(dl.kind === 'sent'){
         delivered = true;
         meta.userId = dl.userId || meta.userId;
@@ -3102,6 +3258,16 @@ function buildOne(traceId, recs){
             finalAnswer: segAnswer, answerParts: segParts, delivered: segDelivered};
   });
 
+  const linked = linkedOf(recs, clean);
+  if(linked.length){
+    const note = {level: 'note', text: 'Трейс собран из <b>' + (linked.length + 1) + '</b> traceId: кроме основного, ' +
+      linked.map(l => '<code>' + escText(l.traceId) + '</code> — ' + escText(l.what) + ' (' + l.count + ' зап.)').join('; ') +
+      '. Эти звенья логируются под своими traceId, связаны по ' +
+      Array.from(new Set(linked.map(l => l.why === 'flow' ? 'session_id запуска флоу' : 'messageId вызова модели'))).join(' и ') + '.'};
+    agg.findings.unshift(note);
+    segments.forEach(sg => sg.findings.unshift(note));
+  }
+
   return {
     traceId: traceId, meta: meta, records: recs, events: clean,
     quality: extractQuality(recs),
@@ -3111,7 +3277,8 @@ function buildOne(traceId, recs){
     subAgents: subAgents, mainAgent: mainAgent, mcpGroups: mcpGroups,
     findings: agg.findings, errors: errs, errorTotal: errTotal,
     stats: agg.stats, segments: segments,
-    budget: mcpBudget(clean, recs)
+    budget: mcpBudget(clean, recs),
+    linked: linked
   };
 }
 // ==== PARSER:END ====
@@ -3447,7 +3614,9 @@ function exportTrace(i){
 
 function uniqueTraceIds(traces){
   const ids = [], seen = new Set();
-  (traces || []).forEach(t => {
+  const flat = [];
+  (traces || []).forEach(t => { flat.push(t); (t && t.linked || []).forEach(l => flat.push({traceId: l.traceId})); });
+  flat.forEach(t => {
     const id = String(t && t.traceId != null ? t.traceId : '').trim();
     if(!id || id === NO_TRACE || id === 'null' || id === '(empty)' || id === '-') return;
     // Hex trace ids are case-insensitive; preserve the spelling of the first occurrence
@@ -3748,7 +3917,10 @@ function renderTabs(){
       (l.cus ? '<span class="tcus">- ' + esc(l.cus) + '</span>' : '') +
       (l.fio ? '<span class="tfio">- ' + esc(l.fio) + '</span>' : '') +
     '</span>' +
-    '<span class="tnum">' + t.stats.records + ' зап.</span></button>' +
+    '<span class="tnum">' +
+    ((t.linked || []).length ? '<span class="tlinked" title="' + esc('Собран из traceId:\n' + [t.traceId].concat(t.linked.map(l => l.traceId + ' — ' + l.what)).join('\n')) + '">+' +
+      t.linked.length + ' traceId</span>' : '') +
+    t.stats.records + ' зап.</span></button>' +
     '<button class="tabdl" data-i="' + i + '" title="Выгрузить логи этого traceId в JSON (' +
       t.stats.records + ')" aria-label="Выгрузить логи этого traceId в JSON">' + DL_ICON + '</button>' +
     '</div>';
@@ -3791,15 +3963,66 @@ function evSpan(e){
   if(e.ms != null) return {start: e.ts - e.ms, end: e.ts};
   return {start: e.ts, end: null};
 }
-function pretty(txt){
-  const o = safeJson(txt);
-  if(o) { try { return JSON.stringify(o, null, 2); } catch(e){} }
-  return String(txt == null ? '' : txt);
+/* Lay out something that looks like JSON but does not parse — Kibana cuts long records
+   mid-object, masking replaces numbers with *MASKED_X*, some payloads carry a trailing
+   tail of their own. Nothing here is parsed: the text is walked character by character,
+   strings are passed through untouched, and the structural characters get the line
+   breaks and indentation. Whatever is left when the text ends simply ends. */
+function prettyLoose(src){
+  const s = String(src);
+  let out = '', ind = 0, inStr = false, esc = false, cut = false;
+  const nl = n => '\n' + '  '.repeat(Math.max(0, n));
+  const nextNonWs = i => { while(i < s.length && /\s/.test(s[i])) i++; return i; };
+  for(let i = 0; i < s.length; i++){
+    const c = s[i];
+    if(inStr){
+      out += c;
+      if(esc) esc = false;
+      else if(c === '\\') esc = true;
+      else if(c === '"') inStr = false;
+      continue;
+    }
+    if(c === '"'){ inStr = true; out += c; continue; }
+    if(c === '{' || c === '['){
+      const j = nextNonWs(i + 1), close = c === '{' ? '}' : ']';
+      if(s[j] === close){ out += c + close; i = j; continue; }   // keep {} and [] on one line
+      out += c; ind++; out += nl(ind); i = j - 1; continue;
+    }
+    if(c === '}' || c === ']'){
+      ind--; out = out.replace(/[ \n]+$/, '');
+      out += nl(ind) + c; continue;
+    }
+    if(c === ','){ out += c; out += nl(ind); i = nextNonWs(i + 1) - 1; continue; }
+    if(c === ':'){ out += ': '; i = nextNonWs(i + 1) - 1; continue; }
+    if(/\s/.test(c)) continue;      // whitespace outside strings carries nothing
+    out += c;
+  }
+  if(inStr || ind > 0) cut = true;   // ended inside a string or with brackets still open
+  return {text: out, cut: cut};
 }
+/* JSON.stringify when it parses; otherwise, for anything that starts like JSON, the
+   loose layout above; plain text is returned as it is. */
+function prettyInfo(txt){
+  const o = safeJson(txt);
+  if(o){ try { return {text: JSON.stringify(o, null, 2), loose: false, cut: false}; } catch(e){} }
+  const raw = String(txt == null ? '' : txt);
+  const t = raw.trim();
+  if(t.charAt(0) === '{' || t.charAt(0) === '['){
+    const r = prettyLoose(t);
+    return {text: r.text, loose: true, cut: r.cut};
+  }
+  return {text: raw, loose: false, cut: false};
+}
+function pretty(txt){ return prettyInfo(txt).text; }
 function payloadBlock(label, txt, cls){
   if(!txt) return '';
-  return '<details class="pay' + (cls ? ' ' + cls : '') + '"><summary>' + esc(label) + '</summary>' +
-         '<pre class="json">' + esc(pretty(txt)) + '</pre></details>';
+  const r = prettyInfo(txt);
+  const mark = r.loose ? '<span class="paymark" title="' +
+    (r.cut ? 'JSON не закрыт — запись обрезана в выгрузке. Показан как есть, с отступами'
+           : 'JSON не разбирается (маскирование или посторонний текст). Показан как есть, с отступами') +
+    '">' + (r.cut ? 'обрезан' : 'не разбирается') + '</span>' : '';
+  return '<details class="pay' + (cls ? ' ' + cls : '') + '"><summary>' + esc(label) + mark + '</summary>' +
+         '<pre class="json' + (r.loose ? ' loose' : '') + '">' + esc(r.text) + '</pre></details>';
 }
 
 function renderReport(){
@@ -3824,7 +4047,8 @@ function renderReport(){
     ['сегмент', ctx.segment || (tr.userQ && tr.userQ.segment) || '—'],
     ['начало', m.from ? m.from.toLocaleString('ru-RU') : '—'],
     ['длительность', (m.durationMs / 1000).toFixed(1) + ' с']
-  ].map(p => '<div class="idcell"><dt>' + esc(p[0]) + '</dt><dd>' + esc(p[1]) + '</dd></div>').join('');
+  ].concat((tr.linked || []).length ? [['связанные traceId', tr.linked.map(l => l.traceId + ' (' + l.what + ')').join('\n')]] : [])
+  .map(p => '<div class="idcell"><dt>' + esc(p[0]) + '</dt><dd>' + esc(p[1]) + '</dd></div>').join('');
 
   // verdict / stats / answer are rendered from a source so they can be swapped per request
   const verdictHtml = f =>
@@ -3973,7 +4197,7 @@ function renderReport(){
     if(!parts || !parts.length) return '<div class="quote full answer">' + esc(ans) + '</div>';
     return '<div class="quote full answer">' + parts.map(p => {
       if(p.kind === 'text') return '<div class="abody">' + esc(p.text) + '</div>';
-      const label = p.kind === 'asset' ? 'карточка' : 'кнопки';
+      const label = p.kind === 'asset' ? 'карточка' : p.kind === 'chart' ? 'график' : 'кнопки';
       return '<details class="synth ' + p.kind + '"><summary>' +
         '<span class="slab">' + label + '</span>' +
         '<span class="stxt">' + esc(p.text) + '</span></summary>' +
