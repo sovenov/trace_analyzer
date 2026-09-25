@@ -43,6 +43,9 @@ body{
   color:var(--muted);
 }
 
+.popout{margin-left:auto;font-size:13px;color:var(--navy);text-decoration:none;white-space:nowrap}
+.popout:hover{text-decoration:underline}
+
 /* ---------- dropzone ---------- */
 .drop{
   border:1.5px dashed var(--rule);
@@ -52,6 +55,7 @@ body{
   text-align:center;
   transition:border-color .15s,background .15s;
   cursor:pointer;
+  display:block;      /* a <label> is inline by default — with h2/p inside, the border broke apart */
 }
 .drop:hover,.drop.hot{border-color:var(--crimson);background:var(--paper-2)}
 .drop.hot{border-style:solid}

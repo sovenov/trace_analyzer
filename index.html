@@ -8,13 +8,28 @@
 <meta http-equiv="Expires" content="0">
 <title>Разбор трейса</title>
 <!-- ?v=… — сброс кэша браузера/GitHub Pages: увеличьте число при изменении css/js -->
-<link rel="stylesheet" href="css/styles.css?v=13">
+<link rel="stylesheet" href="css/styles.css?v=14">
+<!-- the "scripts did not run" notice below must work even when css/js are not loaded:
+     it appears on its own after 2 s, and js/app.js removes it as soon as it runs -->
+<style>
+#nojs{max-height:0;overflow:hidden;margin:0;padding:0 14px;border:0 solid #F6AEA9;border-radius:10px;
+  background:#FCE8E6;color:#8C1D18;font:14px/1.5 Arial,sans-serif;animation:nojs-show 0s linear 2s forwards}
+@keyframes nojs-show{to{max-height:600px;margin:0 0 18px;padding:12px 14px;border-width:1px}}
+</style>
 </head>
 <body>
 <div class="wrap">
 
   <div class="masthead">
     <h1>Разбор трейса (локально в браузере) (Инвест-агент)</h1>
+  </div>
+
+  <div id="nojs" role="alert">
+    <b>Скрипты страницы не запустились</b> — выбрать или перетащить файлы здесь не получится.<br>
+    Если анализатор встроен в Confluence, тот, скорее всего, запрещает скрипты во встроенном HTML
+    (sandbox / Content-Security-Policy; точная причина — в консоли браузера, F12 → Console).
+    Откройте анализатор отдельной вкладкой: <a href="https://sovenov.github.io/trace_analyzer/" target="_blank" rel="noopener">sovenov.github.io/trace_analyzer</a>.
+    Если он открыт из файлов на диске — проверьте, что рядом с index.html лежат папки <code>css</code> и <code>js</code>.
   </div>
 
   <label class="drop" id="drop" tabindex="0" role="button">
@@ -32,12 +47,12 @@
 
 </div>
 
-<script src="js/parser.js?v=13"></script>
-<script src="js/contracts.js?v=13"></script>
-<script src="js/app.js?v=13"></script>
-<script src="js/budget.js?v=13"></script>
-<script src="js/report.js?v=13"></script>
-<script src="js/contracts-ui.js?v=13"></script>
-<script src="js/raw.js?v=13"></script>
+<script src="js/parser.js?v=14"></script>
+<script src="js/contracts.js?v=14"></script>
+<script src="js/app.js?v=14"></script>
+<script src="js/budget.js?v=14"></script>
+<script src="js/report.js?v=14"></script>
+<script src="js/contracts-ui.js?v=14"></script>
+<script src="js/raw.js?v=14"></script>
 </body>
 </html>

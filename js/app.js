@@ -6,15 +6,35 @@ const esc = s => String(s == null ? '' : s)
 
 let STATE = {traces: [], files: [], active: 0, raw: [], brokenFiles: []};
 
+// the scripts are running — the notice for the case they are not goes away
+{ const nj = $('#nojs'); if(nj) nj.remove(); }
+
 const drop = $('#drop'), picker = $('#picker');
-['dragenter','dragover'].forEach(ev => drop.addEventListener(ev, e => {
-  e.preventDefault(); drop.classList.add('hot');
-}));
-['dragleave','drop'].forEach(ev => drop.addEventListener(ev, e => {
-  e.preventDefault(); drop.classList.remove('hot');
-}));
-drop.addEventListener('drop', e => { if(e.dataTransfer && e.dataTransfer.files) loadFiles(e.dataTransfer.files); });
+// Files are taken wherever on the page they are dropped, not only on the zone: anywhere
+// else the browser would open the file itself, and inside an iframe (Confluence) that
+// replaces the analyzer with the raw JSON.
+const hasFiles = e => !!(e.dataTransfer && Array.prototype.indexOf.call(e.dataTransfer.types || [], 'Files') >= 0);
+let dragDepth = 0;
+window.addEventListener('dragenter', e => { if(!hasFiles(e)) return; e.preventDefault(); dragDepth++; drop.classList.add('hot'); });
+window.addEventListener('dragover', e => { if(!hasFiles(e)) return; e.preventDefault(); e.dataTransfer.dropEffect = 'copy'; });
+window.addEventListener('dragleave', e => {
+  if(!hasFiles(e)) return;
+  if(--dragDepth <= 0){ dragDepth = 0; drop.classList.remove('hot'); }
+});
+window.addEventListener('drop', e => {
+  if(!hasFiles(e)) return;
+  e.preventDefault(); dragDepth = 0; drop.classList.remove('hot');
+  if(e.dataTransfer.files && e.dataTransfer.files.length) loadFiles(e.dataTransfer.files);
+});
 drop.addEventListener('keydown', e => { if(e.key === 'Enter' || e.key === ' '){ e.preventDefault(); picker.click(); } });
+
+// embedded in another page (a Confluence iframe): the frame is narrow and the host page
+// may catch dragged files itself — offer the analyzer in a tab of its own
+if(window.top !== window.self){
+  const own = /^(https?|file):/.test(location.protocol) ? location.href.split('#')[0] : 'https://sovenov.github.io/trace_analyzer/';
+  const mh = document.querySelector('.masthead');
+  if(mh) mh.insertAdjacentHTML('beforeend', '<a class="popout" href="' + esc(own) + '" target="_blank" rel="noopener">открыть в отдельной вкладке ↗</a>');
+}
 picker.addEventListener('change', () => loadFiles(picker.files));
 
 /* ---------- streaming loader ----------
@@ -272,7 +292,7 @@ async function saveReport(){
 
   const clone = document.documentElement.cloneNode(true);
   // drop anything from a previous save so re-saving a copy stays idempotent
-  clone.querySelectorAll('#__TRACE_DATA__, #__TRACE_BOOTSTRAP__').forEach(n => n.remove());
+  clone.querySelectorAll('#__TRACE_DATA__, #__TRACE_BOOTSTRAP__, .popout').forEach(n => n.remove());
   // blank runtime containers — the bootstrap refills them on open
   ['#files', '#report', '#fatal', '#budget'].forEach(sel => { const n = clone.querySelector(sel); if(n) n.innerHTML = ''; });
   const tabsN = clone.querySelector('#tabs'); if(tabsN){ tabsN.innerHTML = ''; tabsN.classList.add('hidden'); }
