@@ -107,6 +107,7 @@ body{
 }
 .tabdl:hover{color:var(--navy);border-color:var(--rule);background:var(--paper-2)}
 .tabdl:focus-visible{outline:2px solid var(--navy);outline-offset:-2px}
+.tabdl-l{font-family:var(--mono);font-size:9.5px;font-weight:600;letter-spacing:.04em;margin-left:3px}
 .tab .ttime,.tab .tnum{color:var(--muted);font-variant-numeric:tabular-nums;white-space:nowrap}
 /* id · вопрос · cus · ФИО, packed to the left. The descriptive text may shrink — the id
    and customer code are what you scan for, so they never get cut. */
@@ -159,6 +160,7 @@ body{
   display:flex;gap:12px;padding:11px 15px;
   border-bottom:1px solid var(--rule-soft);font-size:14px;
 }
+.finding>div{min-width:0;overflow-wrap:anywhere}   /* long service lists wrap instead of widening the page */
 .finding:last-child{border-bottom:none}
 .finding .dot{
   flex:0 0 auto;width:7px;height:7px;border-radius:50%;margin-top:7px;
@@ -272,6 +274,7 @@ details.section>summary.section-head:focus-visible h2{color:var(--navy)}
   color:var(--ink-soft);white-space:pre-wrap;
 }
 .quote.full{color:var(--ink)}
+.quote{overflow-wrap:anywhere}   /* ids and JSON without spaces must not widen the page */
 
 /* Inside an answer, a chip row and an instrument card are things the report *describes*,
    not words the assistant wrote. Give them a border and a label so they never read as
@@ -490,6 +493,8 @@ body{background:var(--ground);letter-spacing:.01em}
 .reset:hover{border-color:#AECBFA;background:#E8F0FE;color:var(--navy)}
 .reset.save{background:var(--navy);border-color:var(--navy);color:#fff}
 .reset.save:hover{background:#0A47B0;border-color:#0A47B0;color:#fff}
+.reset.save.one{background:var(--paper-2);border-color:var(--navy);color:var(--navy)}
+.reset.save.one:hover{background:#E8F0FE;color:var(--navy)}
 
 .tabs{gap:3px;margin-top:24px;border:0}
 .tabs-head{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:6px}
@@ -523,7 +528,7 @@ body{background:var(--ground);letter-spacing:.01em}
 .tabrow{border-radius:10px;gap:0}
 .tabrow.on{background:#D3E3FD;outline:0}
 .tab[aria-selected="true"]{border:0;background:transparent;color:#041E49}
-.tabdl{border-radius:10px;width:34px}
+.tabdl{border-radius:10px;width:auto;padding:0 8px}
 .tabdl:hover{color:var(--navy);background:var(--paper);border-color:transparent}
 .tabrow.on .tabdl{color:#0B57D0}
 .tabrow.on .tabdl:hover{background:rgba(255,255,255,.6)}
@@ -777,6 +782,15 @@ table.raw tr:hover td{background:#F1F5FB}
   .idcell{flex-basis:50%}
 }
 @media (max-width:560px){
+  /* trace rows: time and record count on top, the id and the question below, wrapping;
+     the HTML / JSON buttons stacked on the right */
+  .tabrow{display:grid;grid-template-columns:minmax(0,1fr) auto}
+  .tabrow .tab{grid-row:1 / span 2;grid-template-columns:auto 1fr;row-gap:3px;column-gap:10px}
+  .tab .tnum{text-align:right}
+  .tab .tmid{grid-column:1 / -1;grid-row:2;flex-wrap:wrap;column-gap:6px;row-gap:1px}
+  .tab .tid{white-space:normal;overflow-wrap:anywhere}
+  .tab .tq,.tab .tfio{white-space:normal}
+  .tabdl{padding:0 7px}
   .masthead{align-items:flex-start;flex-direction:column;gap:8px}
   .masthead .sub{line-height:1.45}
   .drop{padding:28px 16px}

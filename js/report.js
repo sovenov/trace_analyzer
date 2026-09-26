@@ -31,15 +31,20 @@ function renderTabs(){
     ((t.linked || []).length ? '<span class="tlinked" title="' + esc('Собран из traceId:\n' + [t.traceId].concat(t.linked.map(l => l.traceId + ' — ' + l.what)).join('\n')) + '">+' +
       t.linked.length + ' traceId</span>' : '') +
     t.stats.records + ' зап.</span></button>' +
-    '<button class="tabdl" data-i="' + i + '" title="Выгрузить логи этого traceId в JSON (' +
-      t.stats.records + ')" aria-label="Выгрузить логи этого traceId в JSON">' + DL_ICON + '</button>' +
+    '<button class="tabdl" data-i="' + i + '" data-what="html" title="Сохранить HTML-отчёт только по этому traceId' +
+      ((t.linked || []).length ? ' (вместе со связанными)' : '') + '" aria-label="Сохранить HTML-отчёт по этому traceId">' +
+      DL_ICON + '<span class="tabdl-l">HTML</span></button>' +
+    '<button class="tabdl" data-i="' + i + '" data-what="json" title="Выгрузить логи этого traceId в JSON (' +
+      t.stats.records + ')" aria-label="Выгрузить логи этого traceId в JSON">' + DL_ICON + '<span class="tabdl-l">JSON</span></button>' +
     '</div>';
   }).join('');
   tabs.querySelectorAll('.tab').forEach(b => b.onclick = () => {
     STATE.active = +b.dataset.i; renderTabs(); renderReport();
   });
   tabs.querySelectorAll('.tabdl').forEach(b => b.onclick = e => {
-    e.stopPropagation(); exportTrace(+b.dataset.i);
+    e.stopPropagation();
+    if(b.dataset.what === 'html') saveReport(+b.dataset.i, b);
+    else exportTrace(+b.dataset.i);
   });
   const traceIdsDl = tabs.querySelector('#traceidsdl');
   if(traceIdsDl) traceIdsDl.onclick = exportUniqueTraceIds;

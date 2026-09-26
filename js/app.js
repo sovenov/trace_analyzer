@@ -224,7 +224,11 @@ function renderFiles(files){
            (f.dupes ? ' · −' + f.dupes + ' дубл.' : '') + '</span>';
   }).join('');
   box.innerHTML = chips +
-    (STATE.raw && STATE.raw.length ? '<button class="reset save" id="save">💾 Сохранить отчёт</button>' : '') +
+    (STATE.raw && STATE.raw.length ? '<button class="reset save" id="save" title="Отчёт со всеми загруженными логами — все traceId">💾 Сохранить отчёт' +
+       (STATE.traces.length > 1 ? ' (все traceId)' : '') + '</button>' : '') +
+    // one trace only: also available on a big dump, where the full copy is not kept
+    (STATE.traces.length > 1 || !(STATE.raw && STATE.raw.length) ?
+       '<button class="reset save one" id="saveone" title="Отчёт только по traceId, открытому сейчас (вместе со связанными traceId)">💾 Отчёт по текущему traceId</button>' : '') +
     '<button class="reset" id="reset">Очистить</button>';
   const r = $('#reset');
   if(r) r.onclick = () => {
@@ -235,7 +239,9 @@ function renderFiles(files){
     $('#fatal').innerHTML = ''; picker.value = '';
   };
   const sv = $('#save');
-  if(sv) sv.onclick = saveReport;
+  if(sv) sv.onclick = () => saveReport(null, sv);
+  const so = $('#saveone');
+  if(so) so.onclick = () => saveReport(STATE.active, so);
 }
 
 /* Inner JS of the bootstrap embedded into a saved copy: on open it reads the
@@ -287,8 +293,14 @@ async function readSource(url){
     return r.ok ? await r.text() : null;
   } catch(e){ return null; }
 }
-async function saveReport(){
-  if(!STATE.raw || !STATE.raw.length) return;
+/* ti — index of one trace to save alone (with the traceIds linked into it); null — all */
+async function saveReport(ti, btn){
+  const one = ti != null ? STATE.traces[ti] : null;
+  if(ti != null && !one) return;
+  if(!one && (!STATE.raw || !STATE.raw.length)) return;
+  const files = one
+    ? [{name: 'trace_' + traceSlug(one) + '.json', json: {url: '', logs: traceLogs(ti)}}]
+    : STATE.raw;
 
   const clone = document.documentElement.cloneNode(true);
   // drop anything from a previous save so re-saving a copy stays idempotent
@@ -325,8 +337,8 @@ async function saveReport(){
   // '</' -> '<\/' : keeps a literal closing tag inside the logs from ending the
   // <script> early; JSON.parse turns '\/' back into '/' when the copy opens.
   dataScript.textContent = JSON.stringify({
-    files: STATE.raw,
-    broken: (STATE.brokenFiles || []).map(b => ({name: b.name, why: b.why}))
+    files: files,
+    broken: one ? [] : (STATE.brokenFiles || []).map(b => ({name: b.name, why: b.why}))
   }).replace(/<\//g, '<\\/');
   body.appendChild(dataScript);
 
@@ -336,9 +348,9 @@ async function saveReport(){
   body.appendChild(bootScript);
 
   downloadBlob('<!DOCTYPE html>\n' + clone.outerHTML, 'text/html;charset=utf-8',
-               'trace_report_' + tstamp() + '.html');
+               'trace_report_' + (one ? traceSlug(one) + '_' : '') + tstamp() + '.html');
   if(!portable){
-    const sv = $('#save');
+    const sv = btn || $('#save');
     if(sv){
       const was = sv.textContent;
       sv.textContent = '💾 Сохранено — откроется только на этом компьютере';
@@ -375,17 +387,24 @@ function rawById(){
   return map;
 }
 
+/* Every record of one trace (records of the traceIds linked into it included), in
+   @timestamp order. The original record where STATE.raw still has it, otherwise the
+   normalized copy — a big dump in lean mode, or a report opened from a saved copy. */
+function traceLogs(i){
+  const t = STATE.traces[i];
+  if(!t) return [];
+  const src = rawById();
+  return t.records.map(r => (r.raw && src.get(r.raw._id)) || r.raw);
+}
+function traceSlug(t){
+  return (t.traceId === NO_TRACE ? 'bez-traceid' : t.traceId).replace(/[^\w.-]+/g, '_');
+}
 /* Every record of one trace, in its own file, in the shape the loader accepts. */
 function exportTrace(i){
   const t = STATE.traces[i];
   if(!t) return;
-  const src = rawById();
-  // records are already in @timestamp order; fall back to the normalized copy when the
-  // original is not in STATE.raw (a report opened from a saved copy)
-  const logs = t.records.map(r => (r.raw && src.get(r.raw._id)) || r.raw);
-  const slug = (t.traceId === NO_TRACE ? 'bez-traceid' : t.traceId).replace(/[^\w.-]+/g, '_');
-  downloadBlob(JSON.stringify({url: '', logs: logs}), 'application/json;charset=utf-8',
-               'trace_' + slug + '_' + tstamp() + '.json');
+  downloadBlob(JSON.stringify({url: '', logs: traceLogs(i)}), 'application/json;charset=utf-8',
+               'trace_' + traceSlug(t) + '_' + tstamp() + '.json');
 }
 
 function uniqueTraceIds(traces){
