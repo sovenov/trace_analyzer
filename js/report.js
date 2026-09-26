@@ -1,15 +1,186 @@
-/* Вкладки трейсов и сам отчёт: шапка, выводы, статистика, хроника, ответ. */
+/* Вкладки трейсов и сам отчёт: шапка, выводы, статистика, хроника, ответ.
+   Две группировки: по traceId (разбор одного запроса) и по sessionId (переписка). */
+
+/* the answer the client got: text parts as text, widgets (cards, charts, buttons) as
+   labelled folds that open to their JSON */
+function answerBodyHtml(parts, ans){
+  if(!parts || !parts.length) return '<div class="quote full answer">' + esc(ans) + '</div>';
+  return '<div class="quote full answer">' + parts.map(p => {
+    if(p.kind === 'text') return '<div class="abody">' + esc(p.text) + '</div>';
+    const label = p.kind === 'asset' ? 'карточка' : p.kind === 'chart' ? 'график' : 'кнопки';
+    return '<details class="synth ' + p.kind + '"><summary>' +
+      '<span class="slab">' + label + '</span>' +
+      '<span class="stxt">' + esc(p.text) + '</span></summary>' +
+      '<pre class="json">' + esc(pretty(JSON.stringify(p.node))) + '</pre></details>';
+  }).join('') + '</div>';
+}
+
+/* ====================== grouping by sessionId ======================
+   One dialog = one sessionId of the channel. Every client message of every trace
+   (a trace can carry several) goes into its dialog, with the answer that trace gave to
+   it. A message resent under the same messageId (retries) stays one message, listing
+   every traceId that handled it. */
+function buildSessions(){
+  if(STATE._sessFor === STATE.traces) return STATE._sess;
+  const map = new Map();
+  STATE.traces.forEach((t, ti) => {
+    const qs = (t.userQs && t.userQs.length) ? t.userQs : (t.userQ ? [t.userQ] : []);
+    const ctx = t.meta.ctx || {};
+    const answers = t.events.filter(e => e.kind === 'answer');
+    qs.forEach((q, qi) => {
+      if(!q || !q.text || !String(q.text).trim()) return;
+      const id = q.session || (t.userQ && t.userQ.session) || t.meta.sessionGuess || '';
+      const key = id || '__none__';
+      let s = map.get(key);
+      if(!s){ s = {key: key, id: id, items: [], traces: [], ctx: {}}; map.set(key, s); }
+      Object.keys(ctx).forEach(k => { if(s.ctx[k] == null) s.ctx[k] = ctx[k]; });
+      if(!s.cus) s.cus = q.cus || ctx.cus || '';
+      if(!s.channel) s.channel = [ctx.sourceChannel || q.channel, ctx.channelApp].filter(Boolean)
+                                   .filter((v, i, a) => a.indexOf(v) === i).join(' · ');
+      const seg = t.segments && t.segments[qi];
+      const next = qs[qi + 1];
+      const ans = answers.filter(e => e.ts >= q.ts && (!next || e.ts < next.ts)).pop();
+      const item = {ts: q.ts != null ? q.ts : (t.meta.from ? +t.meta.from : 0), ti: ti, qi: qi, multi: qs.length > 1,
+                    text: String(q.text).trim(), messageId: q.messageId || '',
+                    cus: String(q.cus || ctx.cus || '').trim(),
+                    answer: seg ? seg.finalAnswer : t.finalAnswer, parts: seg ? seg.answerParts : t.answerParts,
+                    delivered: seg ? seg.delivered : t.delivered, ansTs: ans ? ans.ts : null};
+      const dup = item.messageId && s.items.find(x => x.messageId === item.messageId && x.text === item.text);
+      if(dup){
+        dup.also = dup.also || [];
+        dup.also.push(item);
+        // the copy that got an answer out is the one to show
+        if(!dup.answer && item.answer){ ['ti','qi','multi','answer','parts','delivered','ansTs'].forEach(k => { dup[k] = item[k]; }); }
+      } else s.items.push(item);
+      if(s.traces.indexOf(ti) < 0) s.traces.push(ti);
+    });
+  });
+  const out = Array.from(map.values());
+  out.forEach(s => {
+    s.items.sort((a, b) => a.ts - b.ts);
+    s.from = s.items.length ? s.items[0].ts : 0;
+    s.to = s.items.reduce((m, x) => Math.max(m, x.ansTs || x.ts), s.from);
+    s.messages = s.items.length;
+    s.fio = [s.ctx.lastName, s.ctx.firstName, s.ctx.middleName].filter(Boolean).join(' ').trim() || String(s.ctx.nickname || '').trim();
+  });
+  out.sort((a, b) => (a.key === '__none__') - (b.key === '__none__') || a.from - b.from);
+  STATE._sessFor = STATE.traces; STATE._sess = out;
+  return out;
+}
+
+function renderSession(){
+  const host = $('#report');
+  const sessions = buildSessions();
+  const s = sessions.find(x => x.key === STATE.session) || sessions[0];
+  if(!s){ host.innerHTML = '<div class="empty">Сообщений клиента в загруженных логах не найдено.</div>'; return; }
+  STATE.session = s.key;
+  const dt = ms => ms ? new Date(ms).toLocaleString('ru-RU') : '—';
+  const cells = [
+    ['sessionId', s.id || 'не найден'],
+    ['ФИО', s.fio || '—'],
+    ['cus', s.cus || '—'],
+    ['канал', s.channel || '—'],
+    ['сообщений', String(s.messages)],
+    ['traceId', String(s.traces.length)],
+    ['начало', dt(s.from)],
+    ['последний ответ', dt(s.to)]
+  ].map(p => '<div class="idcell"><dt>' + esc(p[0]) + '</dt><dd>' + esc(p[1]) + '</dd></div>').join('');
+  const traceBtn = it => {
+    const t = STATE.traces[it.ti];
+    return '<button type="button" class="mtrace" data-ti="' + it.ti + '"' + (it.multi ? ' data-seg="' + it.qi + '"' : '') +
+      ' title="Открыть разбор этого traceId">traceId <span>' + esc(t.traceId) + '</span></button>';
+  };
+  const msgs = s.items.map(it => {
+    const others = (it.also || []).map(a => traceBtn(a)).join('');
+    const client =
+      '<div class="msg client"><div class="mhead"><span class="mwho"' + ((it.cus || s.cus) ? ' title="CUS клиента"' : '') + '>' +
+        esc(it.cus || s.cus || 'Клиент') + '</span>' +
+        '<span class="mtime">' + esc(fmtStamp(new Date(it.ts))) + '</span>' + traceBtn(it) + '</div>' +
+        '<div class="mtext">' + esc(it.text) + '</div>' +
+        (others ? '<div class="malso">повторно отправлено — ещё ' + (it.also.length) + ' traceId: ' + others + '</div>' : '') +
+      '</div>';
+    const agent = it.answer
+      ? '<div class="msg agent"><div class="mhead"><span class="mwho">Агент</span>' +
+          (it.ansTs ? '<span class="mtime">' + esc(fmtStamp(new Date(it.ansTs))) + '</span>' : '') +
+          (it.ansTs ? '<span class="mdelay">через ' + esc(fmtMs(it.ansTs - it.ts)) + '</span>' : '') +
+          traceBtn(it) +
+          (it.delivered ? '' : '<span class="mflag" title="в логах нет подтверждения, что ответ ушёл клиенту">доставка не подтверждена</span>') +
+        '</div>' + answerBodyHtml(it.parts, it.answer) + '</div>'
+      : '<div class="msg agent none"><div class="mhead"><span class="mwho">Агент</span>' + traceBtn(it) + '</div>' +
+          '<div class="mnone">ответ в логах не найден — откройте traceId, чтобы увидеть, где оборвалось</div></div>';
+    return client + agent;
+  }).join('');
+  host.innerHTML =
+    '<div class="dossier"><div class="eyebrow">Диалог — сообщения клиента и ответы агента</div>' +
+      '<div class="idbar">' + cells + '</div></div>' +
+    '<div class="section"><div class="section-head"><h2>Переписка</h2>' +
+      '<span class="hint">по времени; traceId у сообщения открывает его разбор</span></div>' +
+      '<div class="chat">' + msgs + '</div></div>';
+  host.querySelectorAll('.mtrace').forEach(b => b.onclick = () => openTrace(+b.dataset.ti, b.dataset.seg));
+}
+
+/* from the dialog to the analysis of one trace (and its question, if it has several) */
+function openTrace(ti, seg){
+  STATE.group = 'trace';
+  STATE.active = ti;
+  renderTabs(); renderReport();
+  if(seg != null){
+    const tab = document.querySelector('#segtabs .tab[data-seg="' + seg + '"]');
+    if(tab) tab.click();
+  }
+  const d = document.querySelector('#report .dossier');
+  if(d) d.scrollIntoView({behavior: 'smooth', block: 'start'});
+}
+
 function renderTabs(){
   renderBudget();
   const tabs = $('#tabs');
   if(!STATE.traces.length){ tabs.classList.add('hidden'); tabs.innerHTML = ''; return; }
   tabs.classList.remove('hidden');
   const traceIds = uniqueTraceIds(STATE.traces);
-  tabs.innerHTML = '<div class="tabs-head"><span class="tabs-label">TRACEID</span>' +
+  const sessions = buildSessions();
+  const bySession = STATE.group === 'session';
+  const head = '<div class="tabs-head">' +
+    '<div class="groupby" role="tablist" aria-label="Группировка">' +
+      '<button type="button" role="tab" data-g="trace" aria-selected="' + !bySession + '">по traceId<span class="count">' + STATE.traces.length + '</span></button>' +
+      '<button type="button" role="tab" data-g="session" aria-selected="' + bySession + '"' + (sessions.length ? '' : ' disabled title="ни в одном трейсе не найдено сообщение клиента"') +
+        '>по sessionId<span class="count">' + sessions.length + '</span></button>' +
+    '</div>' +
+    (bySession ? '' :
     '<button class="traceids-dl" id="traceidsdl" type="button"' + (traceIds.length ? '' : ' disabled') +
     ' title="Выгрузить уникальные traceId (' + traceIds.length + ')"' +
     ' aria-label="Выгрузить уникальные traceId">' + DL_ICON +
-    '<span>Выгрузить уникальные traceId</span><span class="count">' + traceIds.length + '</span></button></div>' +
+    '<span>Выгрузить уникальные traceId</span><span class="count">' + traceIds.length + '</span></button>') + '</div>';
+  const wireHead = () => tabs.querySelectorAll('.groupby button').forEach(b => b.onclick = () => {
+    if(b.disabled || STATE.group === b.dataset.g || (!STATE.group && b.dataset.g === 'trace')) return;
+    STATE.group = b.dataset.g;
+    if(STATE.group === 'session'){
+      // open the dialog the trace on screen belongs to
+      const s = sessions.find(x => x.items.some(it => it.ti === STATE.active)) || sessions[0];
+      STATE.session = s ? s.key : null;
+    }
+    renderTabs(); renderReport();
+  });
+  if(bySession){
+    tabs.innerHTML = head + sessions.map(s =>
+      '<div class="tabrow' + (s.key === STATE.session ? ' on' : '') + '">' +
+      '<button class="tab stab" role="tab" data-s="' + esc(s.key) + '" aria-selected="' + (s.key === STATE.session) + '">' +
+        '<span class="ttime">' + esc(fmtStamp(new Date(s.from))) + '</span>' +
+        '<span class="tmid">' +
+          '<span class="tid">' + esc(s.id || 'sessionId не найден') + '</span>' +
+          (s.channel ? '<span class="tcus">- ' + esc(s.channel) + '</span>' : '') +
+          (s.cus ? '<span class="tcus">- ' + esc(s.cus) + '</span>' : '') +
+          (s.fio ? '<span class="tfio">- ' + esc(s.fio) + '</span>' : '') +
+        '</span>' +
+        '<span class="tnum">' + s.messages + ' сообщ. · ' + s.traces.length + ' traceId</span>' +
+      '</button></div>').join('');
+    wireHead();
+    tabs.querySelectorAll('.stab').forEach(b => b.onclick = () => {
+      STATE.session = b.dataset.s; renderTabs(); renderReport();
+    });
+    return;
+  }
+  tabs.innerHTML = head +
     STATE.traces.map((t, i) => {
     const l = tabLabel(t);
       const full = [l.id, l.repeat ? 'повтор ' + l.repeat : '', l.q, l.cus, l.fio]
@@ -38,6 +209,7 @@ function renderTabs(){
       t.stats.records + ')" aria-label="Выгрузить логи этого traceId в JSON">' + DL_ICON + '<span class="tabdl-l">JSON</span></button>' +
     '</div>';
   }).join('');
+  wireHead();
   tabs.querySelectorAll('.tab').forEach(b => b.onclick = () => {
     STATE.active = +b.dataset.i; renderTabs(); renderReport();
   });
@@ -143,6 +315,7 @@ function payloadBlock(label, txt, cls){
 function renderReport(){
   const host = $('#report');
   if(!STATE.traces.length){ host.innerHTML = ''; return; }
+  if(STATE.group === 'session') return renderSession();
   const tr = STATE.traces[STATE.active];
   const m = tr.meta, ctx = m.ctx || {};
 
@@ -154,7 +327,7 @@ function renderReport(){
     ['messageId', m.messageId || '—'],
     ['ФИО', fio || '—'],
     ['cus', (tr.userQ && tr.userQ.cus) || ctx.cus || '—'],
-    ['sessionId', (tr.userQ && tr.userQ.session) || '—'],
+    ['sessionId', (tr.userQ && tr.userQ.session) || m.sessionGuess || '—'],
     // channel_id (UAI_CHAT, AIAD_CHAT…) and the client app it came from (AM, MT, NEW_CLICK…)
     ['канал', [ctx.sourceChannel || (tr.userQ && tr.userQ.channel), ctx.channelApp]
                 .filter(Boolean).filter((v, i, a) => a.indexOf(v) === i).join(' · ') || '—'],
@@ -313,17 +486,7 @@ function renderReport(){
      and an instrument card are things we only describe. Mark those so nobody reads
      "[карточка] …" as something the assistant actually wrote, and let them open to the
      JSON node behind them. */
-  const answerBody = (parts, ans) => {
-    if(!parts || !parts.length) return '<div class="quote full answer">' + esc(ans) + '</div>';
-    return '<div class="quote full answer">' + parts.map(p => {
-      if(p.kind === 'text') return '<div class="abody">' + esc(p.text) + '</div>';
-      const label = p.kind === 'asset' ? 'карточка' : p.kind === 'chart' ? 'график' : 'кнопки';
-      return '<details class="synth ' + p.kind + '"><summary>' +
-        '<span class="slab">' + label + '</span>' +
-        '<span class="stxt">' + esc(p.text) + '</span></summary>' +
-        '<pre class="json">' + esc(pretty(JSON.stringify(p.node))) + '</pre></details>';
-    }).join('') + '</div>';
-  };
+  const answerBody = answerBodyHtml;
   const answerHtml = (ans, parts) => ans ?
     '<div class="section"><div class="section-head"><h2>Что получил пользователь</h2>' +
     '<span class="hint">подсвеченное — не текст ответа, а виджеты; нажмите, чтобы увидеть их JSON</span></div>' +
@@ -598,8 +761,8 @@ function wireTokJump(){
 /* open trace `ti` (if given), then scroll the chronicle to the row at `ts` and flash it */
 function jumpTo(ti, kind, ts){
   {
-    if(ti != null && +ti !== STATE.active){
-      STATE.active = +ti; renderTabs(); renderReport();
+    if(ti != null && (+ti !== STATE.active || STATE.group === 'session')){
+      STATE.active = +ti; STATE.group = 'trace'; renderTabs(); renderReport();
     }
     // token cards name the exact model turn; size cards name a moment, so take the
     // closest chronicle row of that kind

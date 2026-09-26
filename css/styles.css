@@ -501,6 +501,42 @@ body{background:var(--ground);letter-spacing:.01em}
 .tabs-label{
   color:var(--navy);font-size:11px;font-weight:600;letter-spacing:.1em;
 }
+/* grouping switch: по traceId / по sessionId */
+.groupby{display:inline-flex;gap:2px;padding:3px;border-radius:12px;background:var(--paper)}
+.groupby button{
+  display:inline-flex;align-items:center;gap:6px;border:0;border-radius:9px;padding:5px 11px;cursor:pointer;
+  font:600 11px var(--sans);letter-spacing:.06em;text-transform:uppercase;color:var(--muted);background:transparent;
+}
+.groupby button[aria-selected="true"]{background:var(--paper-2);color:var(--navy);box-shadow:0 1px 2px rgba(60,64,67,.12)}
+.groupby button:disabled{opacity:.45;cursor:default}
+.groupby .count{min-width:18px;height:18px;display:inline-grid;place-items:center;padding:0 5px;border-radius:9px;
+  background:var(--ground);font:600 10px var(--mono);letter-spacing:0}
+.groupby button:focus-visible{outline:3px solid #AECBFA;outline-offset:1px}
+
+/* the dialog */
+.chat{display:flex;flex-direction:column;gap:12px;margin-top:14px}
+.msg{max-width:min(760px,88%);border-radius:14px;padding:10px 14px 12px;border:1px solid var(--rule-soft)}
+.msg.client{align-self:flex-end;background:#E8F0FE;border-color:#D2E3FC}
+.msg.agent{align-self:flex-start;background:var(--paper-2)}
+.msg.agent.none{border-style:dashed}
+.mhead{display:flex;flex-wrap:wrap;align-items:baseline;gap:4px 10px;margin-bottom:6px;font-size:12px;color:var(--muted)}
+.mwho{font-weight:600;color:var(--ink-soft)}
+.mtime{font-family:var(--mono);font-size:11px}
+.mdelay{font-size:11px}
+.mtext{white-space:pre-wrap;overflow-wrap:anywhere;font-size:14.5px;line-height:1.55;color:var(--ink)}
+.msg .quote{margin:0;padding:0;border:0;background:none;font-size:14.5px}
+.mtrace{
+  border:0;background:transparent;padding:0;cursor:pointer;color:var(--navy);
+  font:500 11px var(--sans);text-align:left;overflow-wrap:anywhere;
+}
+.mtrace span{font-family:var(--mono);text-decoration:underline;text-decoration-color:#AECBFA;text-underline-offset:2px}
+.mtrace:hover span{text-decoration-color:var(--navy)}
+.mhead .mtrace{margin-left:auto}
+.mflag{font-size:11px;color:var(--amber);background:#FEF7E0;border-radius:8px;padding:0 7px}
+.mnone{font-size:13px;color:var(--muted);font-style:italic}
+.malso{margin-top:6px;font-size:11.5px;color:var(--muted);display:flex;flex-wrap:wrap;gap:4px 10px}
+@media (max-width:560px){ .msg{max-width:100%} .mhead .mtrace{margin-left:0} }
+
 .traceids-dl{
   display:inline-flex;align-items:center;gap:6px;
   font:500 11px var(--sans);color:var(--navy);background:transparent;

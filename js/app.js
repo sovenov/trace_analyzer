@@ -6,8 +6,9 @@ const esc = s => String(s == null ? '' : s)
 
 let STATE = {traces: [], files: [], active: 0, raw: [], brokenFiles: []};
 
-// the scripts are running — the notice for the case they are not goes away
-{ const nj = $('#nojs'); if(nj) nj.remove(); }
+// the scripts are running — the notice for the case they are not goes away. Its markup is
+// kept: a saved report carries it again, for the day it is opened without internet.
+const NOJS_HTML = (() => { const nj = $('#nojs'); const h = nj ? nj.outerHTML : ''; if(nj) nj.remove(); return h; })();
 
 const drop = $('#drop'), picker = $('#picker');
 // Files are taken wherever on the page they are dropped, not only on the zone: anywhere
@@ -283,15 +284,15 @@ function tstamp(){
    We build the data + bootstrap as real DOM <script> nodes and append them to the
    clone — no string surgery on the serialized HTML, so a stray body-close token
    sitting inside this script's own source can never be matched by mistake.
-   The analyzer itself lives in css/ and js/ files; a saved report has to open on its
-   own, so their text is put inline. Served over http(s) (GitHub Pages) the files can be
-   read back; opened straight from disk (file://) the browser forbids reading them, and
-   the copy keeps absolute links to them instead — it then opens on this computer only. */
-async function readSource(url){
-  try {
-    const r = await fetch(url, {cache: 'no-store'});
-    return r.ok ? await r.text() : null;
-  } catch(e){ return null; }
+   The analyzer itself lives in css/ and js/ files. The copy links them from GitHub
+   Pages, wherever this page was opened from (disk, Pages, Confluence): it then opens on
+   any computer with internet access, runs the analyzer's current code over the logs it
+   carries, and stays small. */
+const PAGES_BASE = 'https://sovenov.github.io/trace_analyzer/';
+function pagesUrl(ref){
+  // "js/app.js?v=17", "file:///C:/…/trace_analyzer/js/app.js?v=17", "https://…/js/app.js"
+  const m = /(?:^|\/)((?:css|js)\/[^\/?#]+(?:\?[^#]*)?)$/.exec(String(ref || ''));
+  return m ? PAGES_BASE + m[1] : new URL(ref, PAGES_BASE).href;
 }
 /* ti — index of one trace to save alone (with the traceIds linked into it); null — all */
 async function saveReport(ti, btn){
@@ -311,25 +312,10 @@ async function saveReport(ti, btn){
   const pick = clone.querySelector('#picker'); if(pick) pick.removeAttribute('value');
   const body = clone.querySelector('body');
 
-  let portable = true;
-  for(const link of Array.from(clone.querySelectorAll('link[rel="stylesheet"][href]'))){
-    const url = new URL(link.getAttribute('href'), location.href).href;
-    const txt = await readSource(url);
-    if(txt == null){ link.setAttribute('href', url); portable = false; continue; }
-    const st = document.createElement('style');
-    st.textContent = txt;
-    link.replaceWith(st);
-  }
-  for(const sc of Array.from(clone.querySelectorAll('script[src]'))){
-    const url = new URL(sc.getAttribute('src'), location.href).href;
-    const txt = await readSource(url);
-    if(txt == null){ sc.setAttribute('src', url); portable = false; continue; }
-    const inl = document.createElement('script');
-    // a closing tag spelled inside the source would end the inline script early;
-    // '<\/' means the same thing in every place it can appear in JS
-    inl.textContent = txt.replace(/<\/script/gi, '<\\/script');
-    sc.replaceWith(inl);
-  }
+  const mh = clone.querySelector('.masthead');
+  if(NOJS_HTML && mh && !clone.querySelector('#nojs')) mh.insertAdjacentHTML('afterend', NOJS_HTML);
+  clone.querySelectorAll('link[rel="stylesheet"][href]').forEach(l => l.setAttribute('href', pagesUrl(l.getAttribute('href'))));
+  clone.querySelectorAll('script[src]').forEach(sc => sc.setAttribute('src', pagesUrl(sc.getAttribute('src'))));
 
   const dataScript = document.createElement('script');
   dataScript.id = '__TRACE_DATA__';
@@ -349,16 +335,6 @@ async function saveReport(ti, btn){
 
   downloadBlob('<!DOCTYPE html>\n' + clone.outerHTML, 'text/html;charset=utf-8',
                'trace_report_' + (one ? traceSlug(one) + '_' : '') + tstamp() + '.html');
-  if(!portable){
-    const sv = btn || $('#save');
-    if(sv){
-      const was = sv.textContent;
-      sv.textContent = '💾 Сохранено — откроется только на этом компьютере';
-      sv.title = 'Страница открыта с диска (file://), и браузер не даёт прочитать её css/js, чтобы вложить в отчёт. ' +
-                 'Отчёт ссылается на эти файлы на вашем диске. Для отчёта, который можно отправить, сохраните его со страницы на GitHub Pages.';
-      setTimeout(() => { sv.textContent = was; }, 6000);
-    }
-  }
 }
 
 function downloadBlob(text, mime, filename){

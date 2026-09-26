@@ -284,7 +284,10 @@ function extractUser(msg, app, raw){
       const md = Object.assign({}, ((o.tweaks || {})['Chat Input Metadata'] || {}).metadata || {},
                                (o.metadata && typeof o.metadata === 'object') ? o.metadata : {});
       const cm = o.comod || {};
-      const u = {text: o.input_value, session: o.session_id,
+      // the dialog the client sees is the channel's session (COMOD sessionId); langflow's
+      // own session_id is per queue-keeper run and is kept as flowSession
+      const u = {text: o.input_value, session: (o.comod && o.comod.sessionId) || o.session_id,
+                 flowSession: o.session_id,
                  cus: o.customer_id || cm.cus || md.cus || md.cardOwnerId,
                  channel: o.source_channel_id || cm.source_channel_id || md.channelApp,
                  os: o.operation_system || md.operationSystem,
@@ -1558,6 +1561,10 @@ function buildOne(traceId, recs){
   const mcpHttpPending = new Map();
   const httpCalls = [];
   const sysCount = new Map();
+  // the dialog's sessionId, for traces whose question came without one: the channel's own
+  // (COMOD sessionId) outranks the queue-keeper / langflow run session
+  const sessCount = [new Map(), new Map()];
+  const sessSeen = (rank, v) => { if(v && /^[\w-]{8,}$/.test(v)) sessCount[rank].set(v, (sessCount[rank].get(v) || 0) + 1); };
 
   recs.forEach(r => {
     const msg = r.msg, app = r.app;
@@ -1613,6 +1620,14 @@ function buildOne(traceId, recs){
       const ch = /clientChannel='([A-Z][A-Z0-9_]+)'|['"]source_channel_id['"]\s*:\s*['"]([A-Z][A-Z0-9_]+)['"]/.exec(msg);
       if(ch){ meta.ctx = meta.ctx || {}; meta.ctx.sourceChannel = ch[1] || ch[2]; }
     }
+    if(msg.indexOf('essionId') >= 0){
+      const cs = /"comodSessionId"\s*:\s*"([\w-]+)"/.exec(msg) ||
+                 (msg.indexOf('source_channel_id') >= 0 ? /"sessionId"\s*:\s*"([\w-]+)"/.exec(msg) : null);
+      if(cs) sessSeen(0, cs[1]);
+      const qs = /\bsessionId='([\w-]+)'/.exec(msg);
+      if(qs) sessSeen(1, qs[1]);
+    }
+    if(r.raw && (r.raw.sessionId || r.raw['baggage.sessionId'])) sessSeen(1, String(r.raw.sessionId || r.raw['baggage.sessionId']));
     const ctx = (app === 'alfagen-strategy-api' && msg.indexOf('Incoming request') >= 0) ? extractContext(msg) : null;
     // the async entry point names the client by pin only
     if(app.indexOf('comod-adapter') >= 0 && msg.indexOf('Inbound COMOD request received') === 0){
@@ -1869,6 +1884,9 @@ function buildOne(traceId, recs){
   });
   // most frequent first — the flow's own system_id; sub-flows (prompter, finskill…) follow
   meta.systemIds = Array.from(sysCount.entries()).sort((a, b) => b[1] - a[1]).map(e => e[0]);
+  for(const m of sessCount){
+    if(m.size){ meta.sessionGuess = Array.from(m.entries()).sort((a, b) => b[1] - a[1])[0][0]; break; }
+  }
 
   // ---- one row per MCP call, whichever of langflow's two logs saw it ----------------
   // The component wrapper ([TOOL]) and the http transport ([MCP -> {http}]) describe the

@@ -8,7 +8,7 @@
 <meta http-equiv="Expires" content="0">
 <title>Разбор трейса</title>
 <!-- ?v=… — сброс кэша браузера/GitHub Pages: увеличьте число при изменении css/js -->
-<link rel="stylesheet" href="css/styles.css?v=15">
+<link rel="stylesheet" href="css/styles.css?v=18">
 <!-- the "scripts did not run" notice below must work even when css/js are not loaded:
      it appears on its own after 2 s, and js/app.js removes it as soon as it runs -->
 <style>
@@ -29,7 +29,8 @@
     Если анализатор встроен в Confluence, тот, скорее всего, запрещает скрипты во встроенном HTML
     (sandbox / Content-Security-Policy; точная причина — в консоли браузера, F12 → Console).
     Откройте анализатор отдельной вкладкой: <a href="https://sovenov.github.io/trace_analyzer/" target="_blank" rel="noopener">sovenov.github.io/trace_analyzer</a>.
-    Если он открыт из файлов на диске — проверьте, что рядом с index.html лежат папки <code>css</code> и <code>js</code>.
+    Если это сохранённый отчёт — ему нужен интернет: стили и скрипты он загружает с sovenov.github.io.
+    Если анализатор открыт из файлов на диске — проверьте, что рядом с index.html лежат папки <code>css</code> и <code>js</code>.
   </div>
 
   <label class="drop" id="drop" tabindex="0" role="button">
@@ -47,12 +48,12 @@
 
 </div>
 
-<script src="js/parser.js?v=15"></script>
-<script src="js/contracts.js?v=15"></script>
-<script src="js/app.js?v=15"></script>
-<script src="js/budget.js?v=15"></script>
-<script src="js/report.js?v=15"></script>
-<script src="js/contracts-ui.js?v=15"></script>
-<script src="js/raw.js?v=15"></script>
+<script src="js/parser.js?v=18"></script>
+<script src="js/contracts.js?v=18"></script>
+<script src="js/app.js?v=18"></script>
+<script src="js/budget.js?v=18"></script>
+<script src="js/report.js?v=18"></script>
+<script src="js/contracts-ui.js?v=18"></script>
+<script src="js/raw.js?v=18"></script>
 </body>
 </html>
