@@ -48,9 +48,11 @@ function buildSessions(){
       const dup = item.messageId && s.items.find(x => x.messageId === item.messageId && x.text === item.text);
       if(dup){
         dup.also = dup.also || [];
-        dup.also.push(item);
-        // the copy that got an answer out is the one to show
-        if(!dup.answer && item.answer){ ['ti','qi','multi','answer','parts','delivered','ansTs'].forEach(k => { dup[k] = item[k]; }); }
+        // the copy that got an answer out is the one to show; the other goes to "also"
+        if(!dup.answer && item.answer){
+          dup.also.push({ti: dup.ti, qi: dup.qi, multi: dup.multi});
+          ['ti','qi','multi','answer','parts','delivered','ansTs'].forEach(k => { dup[k] = item[k]; });
+        } else dup.also.push(item);
       } else s.items.push(item);
       if(s.traces.indexOf(ti) < 0) s.traces.push(ti);
     });
@@ -64,7 +66,39 @@ function buildSessions(){
     s.fio = [s.ctx.lastName, s.ctx.firstName, s.ctx.middleName].filter(Boolean).join(' ').trim() || String(s.ctx.nickname || '').trim();
   });
   out.sort((a, b) => (a.key === '__none__') - (b.key === '__none__') || a.from - b.from);
+  out.forEach(s => s.items.forEach(it => { it.skey = s.key; it.sid = s.id; if(!it.cus) it.cus = s.cus; }));
   STATE._sessFor = STATE.traces; STATE._sess = out;
+  STATE._cusFor = null;
+  return out;
+}
+
+/* ====================== grouping by CUS ======================
+   Every dialog of one client, one after another: the same chat, with a divider wherever
+   the conversation moves to another session. */
+function buildCustomers(){
+  const sessions = buildSessions();
+  if(STATE._cusFor === sessions) return STATE._cus;
+  const map = new Map();
+  sessions.forEach(s => s.items.forEach(it => {
+    const key = it.cus || '__none__';
+    let c = map.get(key);
+    if(!c){ c = {key: key, cus: it.cus || '', items: [], sessions: [], traces: [], channels: [], fio: ''}; map.set(key, c); }
+    c.items.push(it);
+    if(c.sessions.indexOf(s) < 0){
+      c.sessions.push(s);
+      if(!c.fio && s.fio) c.fio = s.fio;
+      s.channel && s.channel.split(' · ').forEach(ch => { if(c.channels.indexOf(ch) < 0) c.channels.push(ch); });
+    }
+    [it].concat(it.also || []).forEach(x => { if(c.traces.indexOf(x.ti) < 0) c.traces.push(x.ti); });
+  }));
+  const out = Array.from(map.values());
+  out.forEach(c => {
+    c.items.sort((a, b) => a.ts - b.ts);
+    c.from = c.items.length ? c.items[0].ts : 0;
+    c.to = c.items.reduce((m, x) => Math.max(m, x.ansTs || x.ts), c.from);
+  });
+  out.sort((a, b) => (a.key === '__none__') - (b.key === '__none__') || a.from - b.from);
+  STATE._cusFor = sessions; STATE._cus = out;
   return out;
 }
 
@@ -74,49 +108,96 @@ function renderSession(){
   const s = sessions.find(x => x.key === STATE.session) || sessions[0];
   if(!s){ host.innerHTML = '<div class="empty">Сообщений клиента в загруженных логах не найдено.</div>'; return; }
   STATE.session = s.key;
-  const dt = ms => ms ? new Date(ms).toLocaleString('ru-RU') : '—';
-  const cells = [
+  renderChat(host, 'Диалог — сообщения клиента и ответы агента', [
     ['sessionId', s.id || 'не найден'],
     ['ФИО', s.fio || '—'],
     ['cus', s.cus || '—'],
     ['канал', s.channel || '—'],
     ['сообщений', String(s.messages)],
     ['traceId', String(s.traces.length)],
-    ['начало', dt(s.from)],
-    ['последний ответ', dt(s.to)]
-  ].map(p => '<div class="idcell"><dt>' + esc(p[0]) + '</dt><dd>' + esc(p[1]) + '</dd></div>').join('');
-  const traceBtn = it => {
+    ['начало', chatDate(s.from)],
+    ['последний ответ', chatDate(s.to)]
+  ], s.items, false);
+}
+function renderCustomer(){
+  const host = $('#report');
+  const list = buildCustomers();
+  const c = list.find(x => x.key === STATE.cus) || list[0];
+  if(!c){ host.innerHTML = '<div class="empty">Сообщений клиента в загруженных логах не найдено.</div>'; return; }
+  STATE.cus = c.key;
+  renderChat(host, 'Клиент — все его диалоги подряд', [
+    ['cus', c.cus || 'не найден'],
+    ['ФИО', c.fio || '—'],
+    ['каналы', c.channels.join(', ') || '—'],
+    ['сессий', String(c.sessions.length)],
+    ['сообщений', String(c.items.length)],
+    ['traceId', String(c.traces.length)],
+    ['начало', chatDate(c.from)],
+    ['последний ответ', chatDate(c.to)]
+  ], c.items, true);
+}
+const chatDate = ms => ms ? new Date(ms).toLocaleString('ru-RU') : '—';
+
+/* the conversation: client on the right, agent on the left; above every bubble its traceId
+   (opens the analysis) and sessionId (opens the dialog). With `breaks`, a line marks every
+   move to another session. */
+function renderChat(host, eyebrow, cells, items, breaks){
+  const sessions = buildSessions();
+  const traceLink = it => {
     const t = STATE.traces[it.ti];
-    return '<button type="button" class="mtrace" data-ti="' + it.ti + '"' + (it.multi ? ' data-seg="' + it.qi + '"' : '') +
-      ' title="Открыть разбор этого traceId">traceId <span>' + esc(t.traceId) + '</span></button>';
+    return '<button type="button" class="mlink mtrace" data-ti="' + it.ti + '"' + (it.multi ? ' data-seg="' + it.qi + '"' : '') +
+      ' title="Открыть разбор этого traceId">' + esc(t.traceId) + '</button>';
   };
-  const msgs = s.items.map(it => {
-    const others = (it.also || []).map(a => traceBtn(a)).join('');
+  const ids = it =>
+    '<div class="mids">' +
+      '<span class="mid"><span class="mlab">traceId</span>' + traceLink(it) + '</span>' +
+      '<span class="mid"><span class="mlab">sessionId</span>' +
+        (it.sid ? '<button type="button" class="mlink msess" data-s="' + esc(it.skey) + '" title="Открыть этот диалог">' + esc(it.sid) + '</button>'
+                : '<span class="mnoid">не найден</span>') + '</span>' +
+    '</div>';
+  let prev = null;
+  const msgs = items.map(it => {
+    let sep = '';
+    if(breaks && it.skey !== prev){
+      const s = sessions.find(x => x.key === it.skey) || {};
+      sep = '<div class="msep' + (prev == null ? ' first' : '') + '"><span>' +
+        (prev == null ? 'сессия ' : 'новая сессия ') +
+        (it.sid ? '<button type="button" class="mlink msess" data-s="' + esc(it.skey) + '">' + esc(it.sid) + '</button>' : 'без sessionId') +
+        (s.channel ? ' · ' + esc(s.channel) : '') + ' · ' + esc(fmtStamp(new Date(it.ts))) + '</span></div>';
+      prev = it.skey;
+    }
+    const others = (it.also || []).map(a => traceLink(a)).join('');
     const client =
-      '<div class="msg client"><div class="mhead"><span class="mwho"' + ((it.cus || s.cus) ? ' title="CUS клиента"' : '') + '>' +
-        esc(it.cus || s.cus || 'Клиент') + '</span>' +
-        '<span class="mtime">' + esc(fmtStamp(new Date(it.ts))) + '</span>' + traceBtn(it) + '</div>' +
+      '<div class="msg client">' + ids(it) +
+        '<div class="mhead"><span class="mwho"' + (it.cus ? ' title="CUS клиента"' : '') + '>' + esc(it.cus || 'Клиент') + '</span>' +
+        '<span class="mtime">' + esc(fmtStamp(new Date(it.ts))) + '</span></div>' +
         '<div class="mtext">' + esc(it.text) + '</div>' +
-        (others ? '<div class="malso">повторно отправлено — ещё ' + (it.also.length) + ' traceId: ' + others + '</div>' : '') +
+        (others ? '<div class="malso">повторно отправлено — ещё ' + it.also.length + ' traceId: ' + others + '</div>' : '') +
       '</div>';
     const agent = it.answer
-      ? '<div class="msg agent"><div class="mhead"><span class="mwho">Агент</span>' +
+      ? '<div class="msg agent">' + ids(it) +
+          '<div class="mhead"><span class="mwho">Агент</span>' +
           (it.ansTs ? '<span class="mtime">' + esc(fmtStamp(new Date(it.ansTs))) + '</span>' : '') +
           (it.ansTs ? '<span class="mdelay">через ' + esc(fmtMs(it.ansTs - it.ts)) + '</span>' : '') +
-          traceBtn(it) +
           (it.delivered ? '' : '<span class="mflag" title="в логах нет подтверждения, что ответ ушёл клиенту">доставка не подтверждена</span>') +
         '</div>' + answerBodyHtml(it.parts, it.answer) + '</div>'
-      : '<div class="msg agent none"><div class="mhead"><span class="mwho">Агент</span>' + traceBtn(it) + '</div>' +
+      : '<div class="msg agent none">' + ids(it) + '<div class="mhead"><span class="mwho">Агент</span></div>' +
           '<div class="mnone">ответ в логах не найден — откройте traceId, чтобы увидеть, где оборвалось</div></div>';
-    return client + agent;
+    return sep + client + agent;
   }).join('');
   host.innerHTML =
-    '<div class="dossier"><div class="eyebrow">Диалог — сообщения клиента и ответы агента</div>' +
-      '<div class="idbar">' + cells + '</div></div>' +
+    '<div class="dossier"><div class="eyebrow">' + esc(eyebrow) + '</div>' +
+      '<div class="idbar">' + cells.map(p => '<div class="idcell"><dt>' + esc(p[0]) + '</dt><dd>' + esc(p[1]) + '</dd></div>').join('') + '</div></div>' +
     '<div class="section"><div class="section-head"><h2>Переписка</h2>' +
-      '<span class="hint">по времени; traceId у сообщения открывает его разбор</span></div>' +
+      '<span class="hint">по времени; traceId открывает разбор запроса, sessionId — диалог' + (breaks ? '; линия — переход в другую сессию' : '') + '</span></div>' +
       '<div class="chat">' + msgs + '</div></div>';
   host.querySelectorAll('.mtrace').forEach(b => b.onclick = () => openTrace(+b.dataset.ti, b.dataset.seg));
+  host.querySelectorAll('.msess').forEach(b => b.onclick = () => {
+    STATE.group = 'session'; STATE.session = b.dataset.s;
+    renderTabs(); renderReport();
+    const d = document.querySelector('#report .dossier');
+    if(d) d.scrollIntoView({behavior: 'smooth', block: 'start'});
+  });
 }
 
 /* from the dialog to the analysis of one trace (and its question, if it has several) */
@@ -139,12 +220,17 @@ function renderTabs(){
   tabs.classList.remove('hidden');
   const traceIds = uniqueTraceIds(STATE.traces);
   const sessions = buildSessions();
-  const bySession = STATE.group === 'session';
+  const customers = buildCustomers();
+  const group = STATE.group === 'session' || STATE.group === 'cus' ? STATE.group : 'trace';
+  const bySession = group !== 'trace';
+  const none = sessions.length ? '' : ' disabled title="ни в одном трейсе не найдено сообщение клиента"';
   const head = '<div class="tabs-head">' +
     '<div class="groupby" role="tablist" aria-label="Группировка">' +
-      '<button type="button" role="tab" data-g="trace" aria-selected="' + !bySession + '">по traceId<span class="count">' + STATE.traces.length + '</span></button>' +
-      '<button type="button" role="tab" data-g="session" aria-selected="' + bySession + '"' + (sessions.length ? '' : ' disabled title="ни в одном трейсе не найдено сообщение клиента"') +
+      '<button type="button" role="tab" data-g="trace" aria-selected="' + (group === 'trace') + '">по traceId<span class="count">' + STATE.traces.length + '</span></button>' +
+      '<button type="button" role="tab" data-g="session" aria-selected="' + (group === 'session') + '"' + none +
         '>по sessionId<span class="count">' + sessions.length + '</span></button>' +
+      '<button type="button" role="tab" data-g="cus" aria-selected="' + (group === 'cus') + '"' + none +
+        '>по CUS<span class="count">' + customers.length + '</span></button>' +
     '</div>' +
     (bySession ? '' :
     '<button class="traceids-dl" id="traceidsdl" type="button"' + (traceIds.length ? '' : ' disabled') +
@@ -152,15 +238,37 @@ function renderTabs(){
     ' aria-label="Выгрузить уникальные traceId">' + DL_ICON +
     '<span>Выгрузить уникальные traceId</span><span class="count">' + traceIds.length + '</span></button>') + '</div>';
   const wireHead = () => tabs.querySelectorAll('.groupby button').forEach(b => b.onclick = () => {
-    if(b.disabled || STATE.group === b.dataset.g || (!STATE.group && b.dataset.g === 'trace')) return;
+    if(b.disabled || group === b.dataset.g) return;
+    // keep what is on screen: the dialog / the client of the trace (or dialog) being viewed
+    const fromTrace = group === 'trace';
+    const cur = fromTrace ? null : group === 'session'
+      ? (sessions.find(x => x.key === STATE.session) || {}).items
+      : (customers.find(x => x.key === STATE.cus) || {}).items;
+    const pick = list => list.find(x => fromTrace ? x.items.some(it => it.ti === STATE.active)
+                                                  : (cur || []).some(it => x.items.indexOf(it) >= 0)) || list[0];
     STATE.group = b.dataset.g;
-    if(STATE.group === 'session'){
-      // open the dialog the trace on screen belongs to
-      const s = sessions.find(x => x.items.some(it => it.ti === STATE.active)) || sessions[0];
-      STATE.session = s ? s.key : null;
-    }
+    if(STATE.group === 'session'){ const s = pick(sessions); STATE.session = s ? s.key : null; }
+    if(STATE.group === 'cus'){ const c = pick(customers); STATE.cus = c ? c.key : null; }
     renderTabs(); renderReport();
   });
+  if(group === 'cus'){
+    tabs.innerHTML = head + customers.map(c =>
+      '<div class="tabrow' + (c.key === STATE.cus ? ' on' : '') + '">' +
+      '<button class="tab ctab" role="tab" data-c="' + esc(c.key) + '" aria-selected="' + (c.key === STATE.cus) + '">' +
+        '<span class="ttime">' + esc(fmtStamp(new Date(c.from))) + '</span>' +
+        '<span class="tmid">' +
+          '<span class="tid">' + esc(c.cus || 'CUS не найден') + '</span>' +
+          (c.fio ? '<span class="tfio">- ' + esc(c.fio) + '</span>' : '') +
+          (c.channels.length ? '<span class="tcus">- ' + esc(c.channels.join(', ')) + '</span>' : '') +
+        '</span>' +
+        '<span class="tnum">' + c.sessions.length + ' сесс. · ' + c.items.length + ' сообщ. · ' + c.traces.length + ' traceId</span>' +
+      '</button></div>').join('');
+    wireHead();
+    tabs.querySelectorAll('.ctab').forEach(b => b.onclick = () => {
+      STATE.cus = b.dataset.c; renderTabs(); renderReport();
+    });
+    return;
+  }
   if(bySession){
     tabs.innerHTML = head + sessions.map(s =>
       '<div class="tabrow' + (s.key === STATE.session ? ' on' : '') + '">' +
@@ -316,6 +424,7 @@ function renderReport(){
   const host = $('#report');
   if(!STATE.traces.length){ host.innerHTML = ''; return; }
   if(STATE.group === 'session') return renderSession();
+  if(STATE.group === 'cus') return renderCustomer();
   const tr = STATE.traces[STATE.active];
   const m = tr.meta, ctx = m.ctx || {};
 
@@ -761,7 +870,7 @@ function wireTokJump(){
 /* open trace `ti` (if given), then scroll the chronicle to the row at `ts` and flash it */
 function jumpTo(ti, kind, ts){
   {
-    if(ti != null && (+ti !== STATE.active || STATE.group === 'session')){
+    if(ti != null && (+ti !== STATE.active || (STATE.group && STATE.group !== 'trace'))){
       STATE.active = +ti; STATE.group = 'trace'; renderTabs(); renderReport();
     }
     // token cards name the exact model turn; size cards name a moment, so take the
