@@ -453,7 +453,7 @@ function tabLabel(t){
   return {
     id: t.traceId,
     repeat: t.retry ? t.retry.index + '/' + t.retry.total : '',
-    q: q.length > 200 ? q.slice(0, 200) + '…' : q,
+    q: q,
     cus: String(cus || '').trim(),
     fio: fio
   };

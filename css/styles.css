@@ -116,16 +116,18 @@ div.tab:focus-visible{outline:3px solid #AECBFA;outline-offset:1px}
 .tabdl:focus-visible{outline:2px solid var(--navy);outline-offset:-2px}
 .tabdl-l{font-family:var(--mono);font-size:9.5px;font-weight:600;letter-spacing:.04em;margin-left:3px}
 .tab .ttime,.tab .tnum{color:var(--muted);font-variant-numeric:tabular-nums;white-space:nowrap}
-/* id · вопрос · cus · ФИО, packed to the left. The descriptive text may shrink — the id
-   and customer code are what you scan for, so they never get cut. */
-.tab .tmid{display:flex;align-items:baseline;gap:7px;min-width:0}
-.tab .tid{flex:none;white-space:nowrap}
+/* id · вопрос · cus · ФИО, flowing as one line of text: nothing is cut, a long question
+   wraps and the row grows a line taller. The id and customer code never break. */
+.tab .tmid{display:block;min-width:0}
+.tab .tmid>span{display:inline;margin-right:7px}
+.tab .tmid>span:last-child{margin-right:0}
+.tab .tid{white-space:nowrap}
 /* the strip shows three near-identical rows when one message was retried — say so there,
    not only inside the report nobody has opened yet */
-.tab .trep{flex:none;white-space:nowrap;color:var(--amber)}
-.tab .tq{flex:0 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.tab .tcus{flex:none;white-space:nowrap}
-.tab .tfio{flex:0 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.tab .trep{white-space:nowrap;color:var(--amber)}
+.tab .tq{white-space:normal;overflow-wrap:anywhere}
+.tab .tcus{white-space:nowrap}
+.tab .tfio{white-space:normal}
 
 /* ---------- dossier ---------- */
 .dossier{margin-top:26px}
@@ -844,7 +846,7 @@ table.raw tr:hover td{background:#F1F5FB}
   /* trace rows: time and record count on top, the id and the question below, wrapping;
      the HTML / JSON buttons stacked on the right */
   .tabrow{display:grid;grid-template-columns:minmax(0,1fr) auto}
-  .tabrow .tab{grid-row:1 / span 2;grid-template-columns:auto 1fr;row-gap:3px;column-gap:10px}
+  .tabrow .tab{grid-row:1 / span 3;grid-template-columns:auto 1fr;row-gap:3px;column-gap:10px}
   .tab .tnum{text-align:right;white-space:normal}
   .tab .tmid{grid-column:1 / -1;grid-row:2;flex-wrap:wrap;column-gap:6px;row-gap:1px}
   .tab .tid{white-space:normal;overflow-wrap:anywhere}

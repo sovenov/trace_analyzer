@@ -74,11 +74,10 @@ function wireRaw(tr){
     $('#rawtable').querySelectorAll('details.rawf').forEach(d => d.addEventListener('toggle', () => {
       if(d.open && !d.querySelector('pre')) d.insertAdjacentHTML('beforeend', rawFieldsPre(tr.records[+d.dataset.i]));
     }));
-    // the counts on the two buttons follow the filters
-    const lab = ' (' + withFields.toLocaleString('ru-RU') + ')';
-    $('#rawopen').textContent = 'раскрыть все поля' + lab;
-    $('#rawshut').textContent = 'свернуть все поля' + lab;
-    $('#rawopen').disabled = $('#rawshut').disabled = !withFields;
+    const tg = $('#rawtoggle');
+    tg.title = (allOpen ? 'Скрыть' : 'Раскрыть') + ' «поля записи» у всех показанных строк (' + withFields.toLocaleString('ru-RU') + ')';
+    tg.classList.toggle('close', allOpen);
+    tg.disabled = !withFields;
   }
   // every «поля записи» of the rows shown, at once; the choice holds while filtering
   let allOpen = false;
@@ -89,8 +88,13 @@ function wireRaw(tr){
       d.open = v;
     });
   };
-  $('#rawopen').onclick = () => setAll(true);
-  $('#rawshut').onclick = () => setAll(false);
+  // one button: opens every «поля записи» shown, the next press folds them all again
+  $('#rawtoggle').onclick = () => {
+    setAll(!allOpen);
+    const tg = $('#rawtoggle');
+    tg.classList.toggle('close', allOpen);
+    tg.title = tg.title.replace(/^\S+/, allOpen ? 'Скрыть' : 'Раскрыть');
+  };
   ['#q','#fapp','#flvl'].forEach(s => { $(s).oninput = draw; $(s).onchange = draw; });
 
   // The table is the heaviest thing on the page — thousands of rows with full message
