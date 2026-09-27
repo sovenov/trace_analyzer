@@ -200,6 +200,15 @@ function renderChat(host, eyebrow, cells, items, breaks){
   });
 }
 
+/* the «LLM» buttons of every list row */
+function wireLlm(){
+  document.querySelectorAll('#tabs .tabdl.llm').forEach(b => b.onclick = e => {
+    e.stopPropagation();
+    const sc = b.dataset.scope;
+    exportForLlm(sc, sc === 'trace' ? +b.dataset.key : b.dataset.key, b);
+  });
+}
+
 /* from the dialog to the analysis of one trace (and its question, if it has several) */
 function openTrace(ti, seg){
   STATE.group = 'trace';
@@ -262,11 +271,12 @@ function renderTabs(){
           (c.channels.length ? '<span class="tcus">- ' + esc(c.channels.join(', ')) + '</span>' : '') +
         '</span>' +
         '<span class="tnum">' + c.sessions.length + ' сесс. · ' + c.items.length + ' сообщ. · ' + c.traces.length + ' traceId</span>' +
-      '</button></div>').join('');
+      '</button>' + '<button class="tabdl llm" data-scope="cus" data-key="' + esc(c.key) + '" title="Скачать выжимку для анализа в LLM (Markdown): запрос, путь по сервисам, ходы модели, вызовы инструментов, ответ" aria-label="Выжимка для LLM">' + DL_ICON + '<span class="tabdl-l">LLM</span></button>' + '</div>').join('');
     wireHead();
     tabs.querySelectorAll('.ctab').forEach(b => b.onclick = () => {
       STATE.cus = b.dataset.c; renderTabs(); renderReport();
     });
+    wireLlm();
     return;
   }
   if(bySession){
@@ -281,11 +291,12 @@ function renderTabs(){
           (s.fio ? '<span class="tfio">- ' + esc(s.fio) + '</span>' : '') +
         '</span>' +
         '<span class="tnum">' + s.messages + ' сообщ. · ' + s.traces.length + ' traceId</span>' +
-      '</button></div>').join('');
+      '</button>' + '<button class="tabdl llm" data-scope="session" data-key="' + esc(s.key) + '" title="Скачать выжимку для анализа в LLM (Markdown): запрос, путь по сервисам, ходы модели, вызовы инструментов, ответ" aria-label="Выжимка для LLM">' + DL_ICON + '<span class="tabdl-l">LLM</span></button>' + '</div>').join('');
     wireHead();
     tabs.querySelectorAll('.stab').forEach(b => b.onclick = () => {
       STATE.session = b.dataset.s; renderTabs(); renderReport();
     });
+    wireLlm();
     return;
   }
   tabs.innerHTML = head +
@@ -313,7 +324,8 @@ function renderTabs(){
     '<button class="tabdl" data-i="' + i + '" data-what="html" title="Сохранить HTML-отчёт только по этому traceId' +
       ((t.linked || []).length ? ' (вместе со связанными)' : '') + '" aria-label="Сохранить HTML-отчёт по этому traceId">' +
       DL_ICON + '<span class="tabdl-l">HTML</span></button>' +
-    '<button class="tabdl" data-i="' + i + '" data-what="json" title="Выгрузить логи этого traceId в JSON (' +
+    '<button class="tabdl llm" data-scope="trace" data-key="' + esc(String(i)) + '" title="Скачать выжимку для анализа в LLM (Markdown): запрос, путь по сервисам, ходы модели, вызовы инструментов, ответ" aria-label="Выжимка для LLM">' + DL_ICON + '<span class="tabdl-l">LLM</span></button>' +
+    '<button class="tabdl" data-i="' + i + '" data-what="json" title=""Выгрузить логи этого traceId в JSON (' +
       t.stats.records + ')" aria-label="Выгрузить логи этого traceId в JSON">' + DL_ICON + '<span class="tabdl-l">JSON</span></button>' +
     '</div>';
   }).join('');
@@ -321,11 +333,12 @@ function renderTabs(){
   tabs.querySelectorAll('.tab').forEach(b => b.onclick = () => {
     STATE.active = +b.dataset.i; renderTabs(); renderReport();
   });
-  tabs.querySelectorAll('.tabdl').forEach(b => b.onclick = e => {
+  tabs.querySelectorAll('.tabdl:not(.llm)').forEach(b => b.onclick = e => {
     e.stopPropagation();
     if(b.dataset.what === 'html') saveReport(+b.dataset.i, b);
     else exportTrace(+b.dataset.i);
   });
+  wireLlm();
   const traceIdsDl = tabs.querySelector('#traceidsdl');
   if(traceIdsDl) traceIdsDl.onclick = exportUniqueTraceIds;
 }

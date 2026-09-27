@@ -16,6 +16,7 @@ js/budget.js          блок «бюджет токенов MCP»
 js/report.js          вкладки трейсов и отчёт
 js/contracts-ui.js    блок «Контракты»
 js/raw.js             блок «Сырые записи»
+js/llm-export.js      выгрузка «LLM» — сжатая выжимка в Markdown для анализа моделью
 ```
 
 Скрипты подключаются в этом порядке; `parser.js` и `contracts.js` можно склеить и запускать в node.
