@@ -898,6 +898,10 @@ function renderReport(){
       '<div class="rawbar">' +
         '<input id="q" placeholder="поиск по тексту сообщения…">' +
         '<select id="fapp"></select><select id="flvl"></select>' +
+        '<span class="rawtools">' +
+          '<button type="button" class="foldbtn" id="rawopen">раскрыть все поля</button>' +
+          '<button type="button" class="foldbtn close" id="rawshut">свернуть все поля</button>' +
+        '</span>' +
       '</div><div id="rawtable"></div></details>';
 
   wireContracts(tr, segOf);

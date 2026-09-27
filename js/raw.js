@@ -44,6 +44,7 @@ function wireRaw(tr){
   function draw(){
     const q = $('#q').value.trim().toLowerCase();
     const fa = $('#fapp').value, fl = $('#flvl').value;
+    let withFields = 0;
     // the search looks at the record's fields too: newer services keep the request body,
     // headers and the client profile there, next to a message as short as "[ACCESS] Request"
     const rows = tr.records.filter(r =>
@@ -55,15 +56,17 @@ function wireRaw(tr){
       rows.map(r => {
         const f = rawFields(r), keys = Object.keys(f);
         const hit = q && r.msg.toLowerCase().indexOf(q) < 0;
+        const open = hit || allOpen;
+        if(keys.length) withFields++;
         const payload = keys.filter(k => RAW_PAYLOAD_RE.test(k));
         return '<tr><td>' + esc(r.t ? r.t.toLocaleTimeString('ru-RU') + '.' + String(r.t.getMilliseconds()).padStart(3, '0') : '—') + '</td>' +
           '<td>' + esc(r.app.replace(/^alfagen-/, '')) + '</td>' +
           '<td class="lvl lvl-' + esc(r.level) + '">' + esc(r.level) + '</td>' +
           '<td class="msg">' + esc(r.msg) +
-          (keys.length ? '<details class="rawf"' + (hit ? ' open' : '') + ' data-i="' + tr.records.indexOf(r) + '"><summary>поля записи · ' + keys.length +
+          (keys.length ? '<details class="rawf"' + (open ? ' open' : '') + ' data-i="' + tr.records.indexOf(r) + '"><summary>поля записи · ' + keys.length +
             (payload.length ? '<span class="rawkeys">' + esc(payload.slice(0, 4).join(', ') + (payload.length > 4 ? '…' : '')) + '</span>' : '') +
             (hit ? '<span class="rawhit">найдено в полях</span>' : '') + '</summary>' +
-            (hit ? rawFieldsPre(r) : '') + '</details>' : '') +
+            (open ? rawFieldsPre(r) : '') + '</details>' : '') +
           '</td></tr>';
       }).join('') +
       '</tbody></table>' +
@@ -71,7 +74,23 @@ function wireRaw(tr){
     $('#rawtable').querySelectorAll('details.rawf').forEach(d => d.addEventListener('toggle', () => {
       if(d.open && !d.querySelector('pre')) d.insertAdjacentHTML('beforeend', rawFieldsPre(tr.records[+d.dataset.i]));
     }));
+    // the counts on the two buttons follow the filters
+    const lab = ' (' + withFields.toLocaleString('ru-RU') + ')';
+    $('#rawopen').textContent = 'раскрыть все поля' + lab;
+    $('#rawshut').textContent = 'свернуть все поля' + lab;
+    $('#rawopen').disabled = $('#rawshut').disabled = !withFields;
   }
+  // every «поля записи» of the rows shown, at once; the choice holds while filtering
+  let allOpen = false;
+  const setAll = v => {
+    allOpen = v;
+    $('#rawtable').querySelectorAll('details.rawf').forEach(d => {
+      if(v && !d.querySelector('pre')) d.insertAdjacentHTML('beforeend', rawFieldsPre(tr.records[+d.dataset.i]));
+      d.open = v;
+    });
+  };
+  $('#rawopen').onclick = () => setAll(true);
+  $('#rawshut').onclick = () => setAll(false);
   ['#q','#fapp','#flvl'].forEach(s => { $(s).oninput = draw; $(s).onchange = draw; });
 
   // The table is the heaviest thing on the page — thousands of rows with full message
