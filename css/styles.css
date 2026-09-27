@@ -43,6 +43,8 @@ body{
   color:var(--muted);
 }
 
+.mtitle{display:flex;flex-direction:column;gap:2px;min-width:0}
+.masthead .team{font-size:13px;line-height:1.3;color:var(--muted);font-weight:400}
 .popout{margin-left:auto;font-size:13px;color:var(--navy);text-decoration:none;white-space:nowrap}
 .popout:hover{text-decoration:underline}
 
@@ -97,6 +99,11 @@ body{
 }
 .tabrow{display:flex;align-items:stretch;gap:2px;border-radius:2px}
 .tabrow .tab{flex:1 1 auto;min-width:0}
+/* the rows are not buttons: their words can be selected and copied */
+div.tab{cursor:pointer;user-select:text;-webkit-user-select:text}
+div.tab:focus-visible{outline:3px solid #AECBFA;outline-offset:1px}
+/* selected text inside the open (blue) row: grey, so it does not blend into the row */
+.tabrow.on .tab::selection,.tabrow.on .tab *::selection{background:#BDC1C6;color:#1F1F1F}
 .tabrow.on{background:var(--paper-2);outline:1px solid var(--rule)}
 .tab[aria-selected="true"]{color:var(--ink)}
 /* per-trace export, pinned past the record count */
@@ -452,7 +459,7 @@ pre.json.loose{border-left:2px solid var(--rule)}
 /* ---------- clean Google-inspired theme ---------- */
 ::selection{background:#D3E3FD;color:var(--ink)}
 body{background:var(--ground);letter-spacing:.01em}
-.wrap{max-width:1200px;padding:32px 24px 96px}
+.wrap{max-width:1248px;padding:32px 24px 96px}   /* 1200px of content */
 
 .masthead{
   align-items:center;gap:12px;border:0;padding:0 0 20px;margin-bottom:20px;
@@ -656,6 +663,7 @@ body{background:var(--ground);letter-spacing:.01em}
 /* token blocks sit one under another on one shared 5-column grid, so the cards of
    "этот traceId" line up with the columns of "все traceId" underneath */
 .tokrow{display:flex;flex-direction:column;gap:18px;margin-top:22px}
+details.fold[data-fold="tokens"]>.tokrow:first-of-type,details.fold[data-fold="tokens"]>div>.tokrow:first-of-type{margin-top:12px}
 .tokgroup{min-width:0}
 .tokgroup .stats-cap{font-size:10.5px;font-weight:600;text-transform:uppercase;letter-spacing:.09em;color:var(--muted)}
 .tokgroup .stats{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:10px;margin-top:8px}

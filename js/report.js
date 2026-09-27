@@ -200,6 +200,19 @@ function renderChat(host, eyebrow, cells, items, breaks){
   });
 }
 
+/* A list row opens its item on click, Enter or Space — but its words (traceId, question,
+   CUS, name) stay selectable: a click that ends a text selection inside the row does
+   nothing, and a click on the row already open does not rebuild the list, so a
+   double-click selects a word there. */
+function rowPick(row, open){
+  row.onclick = () => {
+    const sel = window.getSelection && window.getSelection();
+    if(sel && !sel.isCollapsed && String(sel).trim() && row.contains(sel.anchorNode)) return;
+    open();
+  };
+  row.onkeydown = e => { if(e.key === 'Enter' || e.key === ' '){ e.preventDefault(); open(); } };
+}
+
 /* the «LLM» buttons of every list row */
 function wireLlm(){
   document.querySelectorAll('#tabs .tabdl.llm').forEach(b => b.onclick = e => {
@@ -263,7 +276,7 @@ function renderTabs(){
   if(group === 'cus'){
     tabs.innerHTML = head + customers.map(c =>
       '<div class="tabrow' + (c.key === STATE.cus ? ' on' : '') + '">' +
-      '<button class="tab ctab" role="tab" data-c="' + esc(c.key) + '" aria-selected="' + (c.key === STATE.cus) + '">' +
+      '<div class="tab ctab" role="tab" tabindex="0" data-c="' + esc(c.key) + '" aria-selected="' + (c.key === STATE.cus) + '">' +
         '<span class="ttime">' + esc(fmtStamp(new Date(c.from))) + '</span>' +
         '<span class="tmid">' +
           '<span class="tid">' + esc(c.cus || 'CUS не найден') + '</span>' +
@@ -271,18 +284,19 @@ function renderTabs(){
           (c.channels.length ? '<span class="tcus">- ' + esc(c.channels.join(', ')) + '</span>' : '') +
         '</span>' +
         '<span class="tnum">' + c.sessions.length + ' сесс. · ' + c.items.length + ' сообщ. · ' + c.traces.length + ' traceId</span>' +
-      '</button>' + '<button class="tabdl llm" data-scope="cus" data-key="' + esc(c.key) + '" title="Скачать выжимку для анализа в LLM (Markdown): запрос, путь по сервисам, ходы модели, вызовы инструментов, ответ" aria-label="Выжимка для LLM">' + DL_ICON + '<span class="tabdl-l">LLM</span></button>' + '</div>').join('');
+      '</div>' + '<button class="tabdl llm" data-scope="cus" data-key="' + esc(c.key) + '" title="Скачать выжимку для анализа в LLM (Markdown): запрос, путь по сервисам, ходы модели, вызовы инструментов, ответ" aria-label="Выжимка для LLM">' + DL_ICON + '<span class="tabdl-l">LLM</span></button>' + '</div>').join('');
     wireHead();
-    tabs.querySelectorAll('.ctab').forEach(b => b.onclick = () => {
+    tabs.querySelectorAll('.ctab').forEach(b => rowPick(b, () => {
+      if(STATE.cus === b.dataset.c) return;
       STATE.cus = b.dataset.c; renderTabs(); renderReport();
-    });
+    }));
     wireLlm();
     return;
   }
   if(bySession){
     tabs.innerHTML = head + sessions.map(s =>
       '<div class="tabrow' + (s.key === STATE.session ? ' on' : '') + '">' +
-      '<button class="tab stab" role="tab" data-s="' + esc(s.key) + '" aria-selected="' + (s.key === STATE.session) + '">' +
+      '<div class="tab stab" role="tab" tabindex="0" data-s="' + esc(s.key) + '" aria-selected="' + (s.key === STATE.session) + '">' +
         '<span class="ttime">' + esc(fmtStamp(new Date(s.from))) + '</span>' +
         '<span class="tmid">' +
           '<span class="tid">' + esc(s.id || 'sessionId не найден') + '</span>' +
@@ -291,11 +305,12 @@ function renderTabs(){
           (s.fio ? '<span class="tfio">- ' + esc(s.fio) + '</span>' : '') +
         '</span>' +
         '<span class="tnum">' + s.messages + ' сообщ. · ' + s.traces.length + ' traceId</span>' +
-      '</button>' + '<button class="tabdl llm" data-scope="session" data-key="' + esc(s.key) + '" title="Скачать выжимку для анализа в LLM (Markdown): запрос, путь по сервисам, ходы модели, вызовы инструментов, ответ" aria-label="Выжимка для LLM">' + DL_ICON + '<span class="tabdl-l">LLM</span></button>' + '</div>').join('');
+      '</div>' + '<button class="tabdl llm" data-scope="session" data-key="' + esc(s.key) + '" title="Скачать выжимку для анализа в LLM (Markdown): запрос, путь по сервисам, ходы модели, вызовы инструментов, ответ" aria-label="Выжимка для LLM">' + DL_ICON + '<span class="tabdl-l">LLM</span></button>' + '</div>').join('');
     wireHead();
-    tabs.querySelectorAll('.stab').forEach(b => b.onclick = () => {
+    tabs.querySelectorAll('.stab').forEach(b => rowPick(b, () => {
+      if(STATE.session === b.dataset.s) return;
       STATE.session = b.dataset.s; renderTabs(); renderReport();
-    });
+    }));
     wireLlm();
     return;
   }
@@ -307,7 +322,7 @@ function renderTabs(){
     // the row is a pair of siblings, not nested buttons: the tab selects the trace,
     // the trailing one downloads it
     return '<div class="tabrow' + (i === STATE.active ? ' on' : '') + '">' +
-    '<button class="tab" role="tab" data-i="' + i + '" title="' + esc(full) + '" aria-selected="' + (i === STATE.active) + '">' +
+    '<div class="tab" role="tab" tabindex="0" data-i="' + i + '" title="' + esc(full) + '" aria-selected="' + (i === STATE.active) + '">' +
     '<span class="ttime">' + esc(fmtStamp(t.meta.from)) + '</span>' +
     '<span class="tmid">' +
       '<span class="tid">' + esc(l.id) + '</span>' +
@@ -320,7 +335,7 @@ function renderTabs(){
     '<span class="tnum">' +
     ((t.linked || []).length ? '<span class="tlinked" title="' + esc('Собран из traceId:\n' + [t.traceId].concat(t.linked.map(l => l.traceId + ' — ' + l.what)).join('\n')) + '">+' +
       t.linked.length + ' traceId</span>' : '') +
-    t.stats.records + ' зап.</span></button>' +
+    t.stats.records + ' зап.</span></div>' +
     '<button class="tabdl" data-i="' + i + '" data-what="html" title="Сохранить HTML-отчёт только по этому traceId' +
       ((t.linked || []).length ? ' (вместе со связанными)' : '') + '" aria-label="Сохранить HTML-отчёт по этому traceId">' +
       DL_ICON + '<span class="tabdl-l">HTML</span></button>' +
@@ -330,9 +345,10 @@ function renderTabs(){
     '</div>';
   }).join('');
   wireHead();
-  tabs.querySelectorAll('.tab').forEach(b => b.onclick = () => {
+  tabs.querySelectorAll('.tab').forEach(b => rowPick(b, () => {
+    if(STATE.active === +b.dataset.i) return;
     STATE.active = +b.dataset.i; renderTabs(); renderReport();
-  });
+  }));
   tabs.querySelectorAll('.tabdl:not(.llm)').forEach(b => b.onclick = e => {
     e.stopPropagation();
     if(b.dataset.what === 'html') saveReport(+b.dataset.i, b);
@@ -555,6 +571,9 @@ function renderReport(){
     ['чанков RAG', st.rag, ''],
     ['секунд', st.seconds.toFixed(1), '']
   ].map(statCard).join('') + '</div>' +
+    '';
+  // tokens and response sizes of one request, next to the all-traces yardstick
+  const tokInner = (st, label) =>
     '<div class="tokrow">' + tokGroup('Токены · ' + (label || 'этот traceId'), tokCards(st)) + allTokHtml + '</div>' +
     '<div class="tokrow">' + sizeHtml(st, label) + allSizeHtml + '</div>';
 
@@ -695,6 +714,18 @@ function renderReport(){
   const statsBlock = multiQ
     ? seg('all', statsHtml(tr.stats)) + segs.map(s => seg(s.index, statsHtml(s.stats, 'запрос №' + (s.index + 1)))).join('')
     : statsHtml(tr.stats);
+  // a folded section, closed until asked for and kept as the reader left it on the next trace
+  const foldSection = (key, title, hint, body) =>
+    '<details class="section fold" data-fold="' + key + '"' + (STATE.folds && STATE.folds[key] ? ' open' : '') + '>' +
+    '<summary class="section-head"><h2>' + esc(title) + '</h2>' + (hint ? '<span class="hint">' + hint + '</span>' : '') + '</summary>' +
+    body + '</details>';
+  const tokBlock = foldSection('tokens', 'Токены и объём ответов', esc([
+      tr.stats.tokens ? 'этот traceId: ' + fmtN(tr.stats.tokens) + ' ток.' : 'токены в логах не найдены',
+      tr.stats.sizes && tr.stats.sizes.mcp && tr.stats.sizes.mcp.bytes ? 'ответы MCP ' + (b => b < 1024 ? b + ' Б' : b < 1048576 ? (b / 1024).toFixed(1).replace('.', ',') + ' КБ' : (b / 1048576).toFixed(2).replace('.', ',') + ' МБ')(tr.stats.sizes.mcp.bytes) : '',
+      STATE.traces.length > 1 ? 'внутри — сравнение со всеми traceId' : ''
+    ].filter(Boolean).join(' · ')),
+    multiQ ? seg('all', tokInner(tr.stats)) + segs.map(s => seg(s.index, tokInner(s.stats, 'запрос №' + (s.index + 1)))).join('')
+           : tokInner(tr.stats));
   const answerBlock = multiQ
     ? seg('all', answerHtml(tr.finalAnswer, tr.answerParts)) +
       segs.map(s => seg(s.index, answerHtml(s.finalAnswer, s.answerParts))).join('')
@@ -822,14 +853,15 @@ function renderReport(){
       '<span class="qapp">' + esc(st.app.replace(/^aiagentscn-quality-/, '')) + '</span>' +
       '<span class="qtext">' + esc(st.text) + '</span></div>').join('') + '</div>' : '';
 
-    return '<div class="section"><div class="section-head"><h2>Оценка качества</h2>' +
-      '<span class="hint">ночной прогон quality-пайплайна — идёт через несколько часов после разговора, ' +
-      'поэтому в хронику и длительность трейса не входит</span></div>' +
+    const scoreHint = qa.score != null ? 'оценка ' + qa.score + (qa.kind ? ' · ' + qa.kind : '') + ' · ' : '';
+    return foldSection('quality', 'Оценка качества',
+      esc(scoreHint) + 'ночной прогон quality-пайплайна — идёт через несколько часов после разговора, ' +
+      'поэтому в хронику и длительность трейса не входит',
       cells +
       (verdicts.length ? '<div class="verdict">' +
         verdicts.map(x => '<div class="finding ' + x.level + '"><span class="dot"></span><div>' + x.text + '</div></div>').join('') +
         '</div>' : '') +
-      steps + '</div>';
+      steps);
   })();
 
   host.innerHTML =
@@ -859,6 +891,7 @@ function renderReport(){
         '</div></div>').join('') + '</div></div>' : '') +
     contractsSection(tr) +
     answerBlock +
+    tokBlock +
     qualityBlock +
     '<details class="section" id="rawfold"><summary class="section-head"><h2>Сырые записи</h2>' +
       '<span class="hint">' + tr.records.length + ' шт. в этом трейсе — нажмите, чтобы раскрыть</span></summary>' +
@@ -872,6 +905,10 @@ function renderReport(){
   wireFolds();
   wireRaw(tr);
   wireTokJump();
+  document.querySelectorAll('#report details.fold[data-fold]').forEach(d => d.addEventListener('toggle', () => {
+    STATE.folds = STATE.folds || {};
+    STATE.folds[d.dataset.fold] = d.open;
+  }));
 }
 
 /* "самый большой ход LLM" cards: open the owning trace if needed, then scroll to that

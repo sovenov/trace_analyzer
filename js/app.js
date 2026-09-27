@@ -10,6 +10,37 @@ let STATE = {traces: [], files: [], active: 0, raw: [], brokenFiles: []};
 // kept: a saved report carries it again, for the day it is opened without internet.
 const NOJS_HTML = (() => { const nj = $('#nojs'); const h = nj ? nj.outerHTML : ''; if(nj) nj.remove(); return h; })();
 
+/* «Команда инвест-агента» under the page title. Checked every second: if the line is
+   gone, hidden or its text was changed, it is put back. */
+const TEAM_LINE = 'Команда инвест-агента';
+function ensureTeamLine(){
+  let mh = document.querySelector('.masthead');
+  if(!mh){
+    const wrap = document.querySelector('.wrap') || document.body;
+    mh = document.createElement('div');
+    mh.className = 'masthead';
+    mh.innerHTML = '<div class="mtitle"><h1>Разбор трейса (локально в браузере)</h1></div>';
+    wrap.insertBefore(mh, wrap.firstChild);
+  }
+  const box = mh.querySelector('.mtitle') || mh;
+  let el = mh.querySelector('.team');
+  if(!el){
+    el = document.createElement('div');
+    el.className = 'team';
+    const h1 = box.querySelector('h1');
+    if(h1) h1.insertAdjacentElement('afterend', el); else box.insertBefore(el, box.firstChild);
+  }
+  if(el.textContent !== TEAM_LINE) el.textContent = TEAM_LINE;
+  const cs = getComputedStyle(el);
+  if(cs.display === 'none' || cs.visibility === 'hidden' || +cs.opacity === 0){
+    el.style.setProperty('display', 'block', 'important');
+    el.style.setProperty('visibility', 'visible', 'important');
+    el.style.setProperty('opacity', '1', 'important');
+  }
+}
+ensureTeamLine();
+setInterval(ensureTeamLine, 1000);
+
 const drop = $('#drop'), picker = $('#picker');
 // Files are taken wherever on the page they are dropped, not only on the zone: anywhere
 // else the browser would open the file itself, and inside an iframe (Confluence) that
