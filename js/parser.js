@@ -872,6 +872,34 @@ function extractFinalAnswer(msg, app){
   return null;
 }
 
+/* The sync stack when only langflow is in the dump: the answer is what the flow itself
+   returned — the body of its /run/ response (outputs[…].results.message.data.text), or the
+   TChat Output vertex that produced it. Kibana cuts the response mid-JSON, so the text
+   is taken as a JSON string literal rather than parsed out of the whole body. This is
+   what langflow handed back, not proof the client received it. */
+function extractLangflowRunAnswer(msg, app, raw){
+  if(app !== 'alfagen-langflow') return null;
+  let body = null;
+  if(msg.lastIndexOf('[ACCESS] -> Response', 0) === 0 && LANGFLOW_RUN.test(msg)) body = msg;
+  else if(/^\[ACCESS\] Response$/.test(msg) && raw && raw.response_body != null) body = String(raw.response_body);
+  if(body && body.indexOf('"outputs"') >= 0){
+    const m = /"results"\s*:\s*\{\s*"message"\s*:\s*\{[^{}]*?"data"\s*:\s*\{\s*"text"\s*:\s*"((?:[^"\\]|\\.)*)"/.exec(body);
+    if(m){
+      try {
+        const txt = JSON.parse('"' + m[1] + '"');
+        if(txt.trim()) return {text: txt, via: 'ответ флоу langflow'};
+      } catch(e){}
+    }
+  }
+  if(msg.lastIndexOf('Vertex ChatOutput-', 0) === 0){
+    const k = "data={'text': ";
+    const i = msg.indexOf(k);
+    const str = i >= 0 ? pyString(msg, i + k.length) : null;
+    if(str && str.text.trim()) return {text: str.text, via: 'TChat Output langflow'};
+  }
+  return null;
+}
+
 /* Answers now arrive as a structured "assembly" (message bubbles + chip buttons)
    instead of plain text. Flatten it to what the user actually saw. */
 /* Kibana cuts a record at ~6 KB, and an assembly is routinely longer than that, so
@@ -1561,6 +1589,10 @@ function buildOne(traceId, recs){
   const mcpHttpPending = new Map();
   const httpCalls = [];
   const sysCount = new Map();
+  let lfAnswer = null;         // what langflow returned — used only when nothing better was logged
+  // AIAD_CHAT: the bot opens a session of its own for every message; the dialog the client
+  // is in is the channel's one, which langflow passes on as externalSessionId
+  const extSess = new Map();
   // the dialog's sessionId, for traces whose question came without one: the channel's own
   // (COMOD sessionId) outranks the queue-keeper / langflow run session
   const sessCount = [new Map(), new Map()];
@@ -1628,6 +1660,11 @@ function buildOne(traceId, recs){
       if(qs) sessSeen(1, qs[1]);
     }
     if(r.raw && (r.raw.sessionId || r.raw['baggage.sessionId'])) sessSeen(1, String(r.raw.sessionId || r.raw['baggage.sessionId']));
+    if(msg.indexOf('externalSessionId') >= 0){
+      const re = /['"]externalSessionId['"]\s*:\s*['"]([\w-]{8,})['"]/g;
+      let xm;
+      while((xm = re.exec(msg))) extSess.set(xm[1], (extSess.get(xm[1]) || 0) + 1);
+    }
     const ctx = (app === 'alfagen-strategy-api' && msg.indexOf('Incoming request') >= 0) ? extractContext(msg) : null;
     // the async entry point names the client by pin only
     if(app.indexOf('comod-adapter') >= 0 && msg.indexOf('Inbound COMOD request received') === 0){
@@ -1820,6 +1857,8 @@ function buildOne(traceId, recs){
     }
 
     // --- final answer + delivery
+    const lf = extractLangflowRunAnswer(msg, app, r.raw);
+    if(lf) lfAnswer = Object.assign({ts: r.ts, app: app}, lf);
     const fa = extractFinalAnswer(msg, app);
     if(fa && fa.ctx) meta.ctx = Object.assign(meta.ctx || {}, fa.ctx);
     if(fa && fa.messageId) meta.messageId = meta.messageId || fa.messageId;
@@ -1884,6 +1923,16 @@ function buildOne(traceId, recs){
   });
   // most frequent first — the flow's own system_id; sub-flows (prompter, finskill…) follow
   meta.systemIds = Array.from(sysCount.entries()).sort((a, b) => b[1] - a[1]).map(e => e[0]);
+  // no service downstream of langflow logged the answer (the sync stack with only
+  // langflow in the dump): take the one the flow returned
+  if(!finalAnswer && lfAnswer){
+    const t = lfAnswer.text.trim();
+    finalAnswer = humanizeAnswer(t).trim();
+    events.push({ts: lfAnswer.ts, kind: 'answer', depth: 0, chip: 'Ответ', chipClass: 'c-ans',
+                 title: 'Ответ вернул флоу', parts: answerParts(t), quote: finalAnswer, app: lfAnswer.app, full: true,
+                 meta: lfAnswer.via + ' · доставка клиенту в этих логах не видна', deliveredHere: false});
+  }
+  if(extSess.size) meta.channelSession = Array.from(extSess.entries()).sort((a, b) => b[1] - a[1])[0][0];
   for(const m of sessCount){
     if(m.size){ meta.sessionGuess = Array.from(m.entries()).sort((a, b) => b[1] - a[1])[0][0]; break; }
   }

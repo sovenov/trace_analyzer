@@ -29,7 +29,8 @@ function buildSessions(){
     const answers = t.events.filter(e => e.kind === 'answer');
     qs.forEach((q, qi) => {
       if(!q || !q.text || !String(q.text).trim()) return;
-      const id = q.session || (t.userQ && t.userQ.session) || t.meta.sessionGuess || '';
+      // the channel's dialog (AIAD_CHAT: externalSessionId) groups the bot's per-message sessions
+      const id = t.meta.channelSession || q.session || (t.userQ && t.userQ.session) || t.meta.sessionGuess || '';
       const key = id || '__none__';
       let s = map.get(key);
       if(!s){ s = {key: key, id: id, items: [], traces: [], ctx: {}}; map.set(key, s); }
@@ -465,7 +466,10 @@ function renderReport(){
     ['messageId', m.messageId || '—'],
     ['ФИО', fio || '—'],
     ['cus', (tr.userQ && tr.userQ.cus) || ctx.cus || '—'],
-    ['sessionId', (tr.userQ && tr.userQ.session) || m.sessionGuess || '—'],
+    ['sessionId', m.channelSession || (tr.userQ && tr.userQ.session) || m.sessionGuess || '—'],
+    // AIAD_CHAT: the dialog is externalSessionId, the bot opens its own session per message
+    (m.channelSession && tr.userQ && tr.userQ.session && tr.userQ.session !== m.channelSession)
+      ? ['сессия флоу', tr.userQ.session] : null,
     // channel_id (UAI_CHAT, AIAD_CHAT…) and the client app it came from (AM, MT, NEW_CLICK…)
     ['канал', [ctx.sourceChannel || (tr.userQ && tr.userQ.channel), ctx.channelApp]
                 .filter(Boolean).filter((v, i, a) => a.indexOf(v) === i).join(' · ') || '—'],
@@ -478,7 +482,7 @@ function renderReport(){
     ['сегмент', ctx.segment || (tr.userQ && tr.userQ.segment) || '—'],
     ['начало', m.from ? m.from.toLocaleString('ru-RU') : '—'],
     ['длительность', (m.durationMs / 1000).toFixed(1) + ' с']
-  ].concat((tr.linked || []).length ? [['связанные traceId', tr.linked.map(l => l.traceId + ' (' + l.what + ')').join('\n')]] : [])
+  ].filter(Boolean).concat((tr.linked || []).length ? [['связанные traceId', tr.linked.map(l => l.traceId + ' (' + l.what + ')').join('\n')]] : [])
   .map(p => '<div class="idcell"><dt>' + esc(p[0]) + '</dt><dd>' + esc(p[1]) + '</dd></div>').join('');
 
   // verdict / stats / answer are rendered from a source so they can be swapped per request
