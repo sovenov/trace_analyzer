@@ -373,17 +373,6 @@ table.raw td{
 }
 table.raw td.msg{white-space:pre-wrap;word-break:break-word;max-width:0;width:100%}
 table.raw tr:hover td{background:var(--paper)}
-details.rawf{margin-top:5px}
-details.rawf>summary{
-  cursor:pointer;list-style:none;display:inline-flex;align-items:baseline;gap:7px;flex-wrap:wrap;
-  font-family:var(--mono);font-size:11px;color:var(--navy);
-}
-details.rawf>summary::-webkit-details-marker{display:none}
-details.rawf>summary::before{content:"▸";font-size:9px}
-details.rawf[open]>summary::before{content:"▾"}
-.rawkeys{color:var(--muted)}
-.rawhit{color:var(--amber);background:#FEF7E0;border-radius:8px;padding:0 6px}
-pre.json.rawfpre{white-space:pre-wrap;max-height:420px}
 .lvl{font-weight:600}
 .lvl-ERROR{color:var(--crimson)}
 .lvl-WARN,.lvl-WARNING{color:var(--amber)}
@@ -809,7 +798,6 @@ details.pay.idle{margin:0;padding:11px 16px;border-top:1px solid var(--rule-soft
 details.pay.idle .tools{margin-top:10px}
 
 .rawbar{gap:10px;margin-top:16px}
-.rawtools{display:flex;gap:6px;align-items:center;flex-wrap:wrap}
 .rawbar input,.rawbar select{
   min-height:40px;border-color:var(--rule);border-radius:10px;background:var(--paper-2);
   padding:8px 12px;
@@ -947,3 +935,7 @@ pre.json.ctpre .paymark{margin-left:0}
   .ctpanels{grid-template-columns:minmax(0,1fr)}
   .ctroute{columns:1;padding-left:30px}
 }
+
+/* a message the logs only say arrived — the new comod-adapter does not record its text */
+.msg .mtext.mnotext{color:var(--muted);font-style:italic}
+.tab .tq.tnotext{color:var(--muted);font-style:italic}

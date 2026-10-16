@@ -639,6 +639,7 @@ function extractRoute(msg){
   if(msg.lastIndexOf('Роутинг:', 0) === 0) return {kind: 'decision', data: kv(msg.slice(8))};
   if(msg.lastIndexOf('Эвристика завершена:', 0) === 0) return {kind: 'heuristic', data: kv(msg.slice(20))};
   if(msg.lastIndexOf('Failed-agent redirect:', 0) === 0) return {kind: 'redirect', data: kv(msg.slice(22))};
+  if(msg.lastIndexOf('Гейт дрейфа удержал агента:', 0) === 0) return {kind: 'drift', data: kv(msg.slice(27))};
   if(msg.lastIndexOf('Нормализация:', 0) === 0){
     // business=('invest',) social=() … — the tuple keeps its parentheses
     const b = /business=\(([^)]*)\)/.exec(msg);
@@ -680,6 +681,56 @@ function extractComod(msg){
   return {text: text, cus: cm.cus || md.cus, session: cm.sessionId,
           channel: cm.source_channel_id || md.channelApp,
           messageId: cm.messageId, via: via, ctx: Object.keys(ctx).length ? ctx : null};
+}
+
+/* comod-adapter since October 2026 logs the inbound call as one line of fields — which
+   sections came, the channel, the dialog and the client — and no longer the message
+   itself: "Inbound COMOD request received [requestId=…, messageId=…] sectionCount=4,
+   sections=[comod, metadata, assembly, assembly], channel=UAI_CHAT, sessionId=…, xpin=…" */
+function extractComodBrief(msg){
+  if(msg.lastIndexOf('Inbound COMOD request received [', 0) !== 0) return null;
+  if(msg.indexOf('COMOD2AGENTHUB') >= 0) return null;
+  const g = re => { const m = re.exec(msg); return m ? m[1] : null; };
+  return {messageId: g(/messageId='([^']+)'/), channel: g(/\bchannel=([\w-]+)/),
+          session: g(/\bsessionId=([\w-]+)/), cus: g(/\bxpin=(\w+)/),
+          sections: g(/sections=\[([^\]]*)\]/)};
+}
+/* what the adapter decided about a message instead of passing an answer on */
+function extractComodNotice(msg){
+  const g = re => { const m = re.exec(msg); return m ? m[1] : null; };
+  if(msg.lastIndexOf('Inbound ignored [', 0) === 0)
+    return {kind: 'ignored', messageId: g(/messageId='([^']+)'/), reason: g(/reason='([^']*)'/)};
+  if(msg.lastIndexOf('AI Flow processing failed [', 0) === 0)
+    return {kind: 'failed', messageId: g(/messageId='([^']+)'/), event: g(/eventType='([^']*)'/),
+            code: g(/errorCode='([^']*)'/), userMsg: g(/userErrorMessageEnabled='([^']*)'/) === 'true'};
+  return null;
+}
+/* mcp-gateway: "mcp request: method=tools/call, id=1, toolName=pfm__list_cards, clientId=finskill",
+   or the same as raw JSON-RPC. The only trace of the agent's tool calls when langflow's
+   own logs are not in the dump; what the tool returned is not logged here. */
+function extractGatewayCall(msg){
+  if(msg.lastIndexOf('mcp request:', 0) !== 0) return null;
+  const kv = /method=([\w\/]+),.*?toolName=([\w.\-]+|null),.*?clientId=([\w.\-]+)/.exec(msg);
+  if(kv) return {method: kv[1], tool: kv[2] === 'null' ? null : kv[2], client: kv[3]};
+  const m = /"method"\s*:\s*"([\w\/]+)"/.exec(msg);
+  if(!m) return null;
+  const n = /"params"\s*:\s*\{\s*"name"\s*:\s*"([\w.\-]+)"/.exec(msg);
+  return {method: m[1], tool: n ? n[1] : null, client: null};
+}
+/* queue-keeper's "AI Flow callback received" carries the client profile next to every
+   bubble, thinking ones included — the only copy of it once comod-adapter stopped
+   logging the inbound body. A thinking bubble is also what the client saw while waiting. */
+function extractCallbackExtras(msg){
+  if(msg.lastIndexOf('AI Flow callback received', 0) !== 0) return null;
+  const out = {};
+  const i = msg.indexOf('"metadata":{');
+  if(i >= 0){
+    const md = safeJson(balanced(msg, i + 11).text);
+    if(md){ const ctx = ctxFrom(md); if(Object.keys(ctx).length) out.ctx = ctx; }
+  }
+  const t = /"type"\s*:\s*"intermediate"[^{}]*"body"\s*:\s*\{\s*"text"\s*:\s*"((?:[^"\\]|\\.)*)"/.exec(msg);
+  if(t){ try { out.status = JSON.parse('"' + t[1] + '"'); } catch(e){ out.status = t[1]; } }
+  return (out.ctx || out.status) ? out : null;
 }
 
 /* A dozen calls of one tool in a row are told apart only by what was asked, so put the
@@ -1442,10 +1493,15 @@ function summarize(evs, rcs, ctx){
   const maxEv = tokEvs.reduce((m, e) => (!m || tokensOf(e) > tokensOf(m)) ? e : m, null);
 
   const findings = [];
-  if(!ctx.userQ) findings.push({level: 'note', text: 'Текст запроса пользователя в этих файлах не найден — возможно, не хватает более ранней страницы выгрузки.'});
+  if(!ctx.userQ) findings.push({level: 'note', text: ctx.inbound
+    ? 'Текста сообщения клиента в логах нет: comod-adapter записывает только разделы запроса (' +
+      escText(ctx.inbound.sections || '—') + '), а не сам текст' +
+      (ctx.agentHidden ? ', логов агента (langflow) с этим traceId в выгрузке тоже нет.' : '.')
+    : 'Текст запроса пользователя в этих файлах не найден — возможно, не хватает более ранней страницы выгрузки.'});
+  evs.filter(e => e.finding).forEach(e => findings.push({level: e.findingLevel || 'note', text: e.finding}));
   // when the request was turned away at the door, that is the headline: everything below
   // is only describing what did not happen as a consequence
-  if(rejects.length){
+  if(rejects.length && !rejects[rejects.length - 1].finding){
     const r0 = rejects[rejects.length - 1];
     const why = r0.why
       ? ' — ' + escText(String(r0.why).replace(/\s+/g, ' ').trim().slice(0, 300)) : '';
@@ -1469,9 +1525,14 @@ function summarize(evs, rcs, ctx){
     findings.push({level: 'warn', text: rej
       ? (rej.broke ? 'Инструменты не вызывались — запуск оборвался ошибкой раньше.'
                    : 'Инструменты не вызывались — до них дело не дошло, запрос отклонён на входе.')
-      : 'Ни одного результативного вызова MCP-инструмента. Агент не дошёл до данных — смотрите маршрутизацию, а не адаптер.'});
+      : ctx.agentHidden
+        ? (ctx.gatewaySeen ? 'По логу mcp-gateway агент инструменты не вызывал — только получил их список.'
+                           : 'Логов агента (langflow) с этим traceId нет — вызывал ли он инструменты, по этим логам не видно.')
+        : 'Ни одного результативного вызова MCP-инструмента. Агент не дошёл до данных — смотрите маршрутизацию, а не адаптер.'});
   } else {
-    findings.push({level: 'ok', text: 'Вызовов MCP-инструментов: <b>' + mcpCalls.length + '</b> (' + calledMcp.map(n => '<code>' + n + '</code>').join(', ') + ').'});
+    const viaGw = mcpCalls.length && mcpCalls.every(e => e.viaGateway);
+    findings.push({level: 'ok', text: 'Вызовов MCP-инструментов: <b>' + mcpCalls.length + '</b> (' + calledMcp.map(n => '<code>' + n + '</code>').join(', ') + ')' +
+      (viaGw ? ' — по логу mcp-gateway: логов самого агента нет, поэтому аргументы и ответы инструментов не видны.' : '.')});
   }
   if(plan){
     const planned = (plan.steps || []).reduce((a, s) => a.concat(s.tools || []), []);
@@ -1496,7 +1557,8 @@ function summarize(evs, rcs, ctx){
   if(ragHits.length){
     findings.push({level: 'ok', text: 'RAG отработал: получено чанков — <b>' + ragHits.map(e => e.chunks).join(', ') + '</b>.'});
   } else {
-    findings.push({level: 'note', text: 'В RAG агент не ходил.'});
+    findings.push({level: 'note', text: ctx.agentHidden
+      ? 'Ходил ли агент в RAG, не видно: логов langflow с этим traceId нет.' : 'В RAG агент не ходил.'});
   }
   if(allAvailable.length && calledMcp.length){
     const unused = allAvailable.length - calledMcp.length;
@@ -1513,6 +1575,7 @@ function summarize(evs, rcs, ctx){
     ? 'Ответ отдан вызывающей системе в ответе на запрос (' + escText(ctx.answerVia) + ').'
     : 'Ответ доставлен в чат.'});
   else if(finalAnswer) findings.push({level: 'note', text: 'Подтверждения доставки в bot-conversation-api нет.'});
+  else if(ctx.inbound && !rejects.length) findings.push({level: 'warn', text: 'Ответа агента в этих логах нет.'});
 
   return {
     findings: findings,
@@ -1590,6 +1653,9 @@ function buildOne(traceId, recs){
   const httpCalls = [];
   const sysCount = new Map();
   let lfAnswer = null;         // what langflow returned — used only when nothing better was logged
+  let inbound = null;          // comod-adapter's one-line inbound record (no message text)
+  const gwCalls = [];          // mcp-gateway's view of the agent's tool calls
+  const statusSeen = new Set();
   // AIAD_CHAT: the bot opens a session of its own for every message; the dialog the client
   // is in is the channel's one, which langflow passes on as externalSessionId
   const extSess = new Map();
@@ -1600,6 +1666,52 @@ function buildOne(traceId, recs){
 
   recs.forEach(r => {
     const msg = r.msg, app = r.app;
+
+    // --- the new comod-adapter: who wrote, in which dialog — but not what
+    const cb = extractComodBrief(msg);
+    if(cb){
+      meta.ctx = meta.ctx || {};
+      if(cb.cus && !meta.ctx.cus) meta.ctx.cus = cb.cus;
+      if(cb.channel && !meta.ctx.sourceChannel) meta.ctx.sourceChannel = cb.channel;
+      if(cb.messageId) meta.messageId = meta.messageId || cb.messageId;
+      if(!inbound){
+        inbound = Object.assign({ts: r.ts, app: app}, cb);
+        events.push({ts: r.ts, kind: 'user', depth: 0, chip: 'Запрос', chipClass: 'c-user',
+                     title: 'Сообщение клиента принято', app: app, noText: true,
+                     meta: ['текст comod-adapter не записывает', cb.sections ? 'разделы: ' + cb.sections : null,
+                            cb.channel].filter(Boolean).join(' · ')});
+      }
+    }
+    const cn = extractComodNotice(msg);
+    if(cn && cn.kind === 'failed'){
+      const timeout = /timeout/i.test(cn.event || '') || /TIMEOUT/.test(cn.code || '');
+      events.push({ts: r.ts, kind: 'reject', depth: 0, chip: 'Сбой', chipClass: 'c-err', app: app, broke: true,
+                   title: timeout ? 'Агент не ответил вовремя' : 'Обработка сообщения агентом не удалась',
+                   meta: [cn.code, cn.event ? 'событие ' + cn.event : null,
+                          cn.userMsg ? 'клиенту отправлено сообщение об ошибке' : null].filter(Boolean).join(' · '),
+                   finding: (timeout ? 'Агент не прислал ответ вовремя' : 'comod-adapter не дождался ответа агента') +
+                            ': <code>' + escText(cn.code || cn.event || 'ошибка') + '</code>' +
+                            (cn.userMsg ? ' — клиенту ушло сообщение об ошибке.' : '.'),
+                   findingLevel: 'warn'});
+    } else if(cn && cn.kind === 'ignored'){
+      events.push({ts: r.ts, kind: 'status', depth: 0, chip: 'Отложено', chipClass: 'c-err', app: app,
+                   title: 'comod-adapter не передал сообщение агенту', quote: cn.reason || '',
+                   finding: 'comod-adapter отложил сообщение: <code>' + escText(cn.reason || '—') + '</code>' +
+                            (/media/i.test(cn.reason || '') ? ' — ждал распознавания голосового или вложения.' : '.'),
+                   findingLevel: 'note'});
+    }
+    const gw = app === 'mcp-gateway' ? extractGatewayCall(msg) : null;
+    if(gw) gwCalls.push(Object.assign({ts: r.ts}, gw));
+    const cx = extractCallbackExtras(msg);
+    if(cx){
+      if(cx.ctx) meta.ctx = Object.assign({}, cx.ctx, meta.ctx || {});   // what was seen first wins
+      if(cx.status && !statusSeen.has(cx.status)){
+        statusSeen.add(cx.status);
+        events.push({ts: r.ts, kind: 'status', depth: 0, chip: 'Статус', chipClass: 'c-sys', app: app,
+                     title: 'Промежуточное сообщение клиенту',
+                     quote: cx.status.split(';').map(x => x.trim()).filter(Boolean).join(' · ')});
+      }
+    }
 
     // --- user question. The same question is reported by several services (merge
     // those), but a genuinely new question text starts a new segment of the trace.
@@ -1948,6 +2060,35 @@ function buildOne(traceId, recs){
     if(!twin) events.push(h);
   });
 
+  // ---- the agent's work when langflow's own logs are not in the dump -----------------
+  // The new stack routes through the orchestrator to a flow whose records may sit under
+  // another traceId or not be exported at all. What stays in the trace is the gateway
+  // every tool call goes through: name and client, not arguments or results.
+  const hasLangflow = recs.some(r => r.app === 'alfagen-langflow');
+  meta.agentHidden = !hasLangflow && !!(inbound || events.some(e => e.kind === 'route'));
+  // with the question known from langflow, the adapter's text-less copy adds nothing
+  if(userQ){ const i = events.findIndex(e => e.kind === 'user' && e.noText); if(i >= 0) events.splice(i, 1); }
+  if(inbound){
+    meta.inbound = {ts: inbound.ts, messageId: inbound.messageId, sections: inbound.sections};
+    if(!meta.channelSession && inbound.session) meta.channelSession = inbound.session;
+  }
+  const lfTools = events.some(e => (e.kind === 'mcp' || e.kind === 'mcpwrap' || e.kind === 'subagent') &&
+                                   e.app === 'alfagen-langflow');
+  if(gwCalls.length && !lfTools){
+    meta.gatewayOnly = true;
+    gwCalls.forEach(g => {
+      if(g.method === 'tools/call' && g.tool){
+        events.push({ts: g.ts, kind: 'mcpwrap', phase: 'in', depth: 2, chip: 'MCP', chipClass: 'c-mcp',
+                     title: 'Инструмент ', name: g.tool, app: 'mcp-gateway', viaGateway: true,
+                     meta: ['по логу mcp-gateway', g.client ? 'клиент ' + g.client : null,
+                            'аргументы и ответ здесь не записаны'].filter(Boolean).join(' · ')});
+      } else if(meta.agentHidden){
+        events.push({ts: g.ts, kind: 'sys', depth: 2, chip: 'MCP', chipClass: 'c-sys', name: g.method,
+                     title: 'Протокол ', app: 'mcp-gateway', minor: true});
+      }
+    });
+  }
+
   // ---- how the request reached a flow ------------------------------------------------
   // A message from a third-party client lands on the orchestrator, which classifies it,
   // picks one agent flow and forwards it there; if that flow answers with an error, the
@@ -1973,6 +2114,9 @@ function buildOne(traceId, recs){
       if(att.url) bits.push('flow ' + att.url);
       if(att.failed) bits.push('после сбоя ' + att.failed);
       if(att.predicts) bits.push('классификатор: ' + att.predicts);
+      if(att.drift) bits.push('гейт дрейфа оставил ' + (att.drift.prev_domain || 'прежний домен') +
+        (att.drift.new_domain ? ' вместо ' + att.drift.new_domain : '') +
+        (att.drift.margin ? ' (margin ' + att.drift.margin + (att.drift.threshold ? ' < ' + att.drift.threshold : '') + ')' : ''));
       events.push({ts: att.endTs != null ? att.endTs : att.ts, startTs: att.ts,
                    ms: att.endTs != null ? (att.endTs - att.ts) : null,
                    kind: 'route', depth: 0, chip: 'Роутер', chipClass: 'c-route',
@@ -2005,6 +2149,7 @@ function buildOne(traceId, recs){
         att.agent = att.agent || rt.data.agent;
       }
       else if(rt.kind === 'norm' && rt.domains) att.domains = rt.domains;
+      else if(rt.kind === 'drift') att.drift = rt.data;
       if(rt.kind === 'end'){ att.endTs = r.ts; flushRoute(); }
       return;
     }
@@ -2447,7 +2592,7 @@ function buildOne(traceId, recs){
     if(e.kind === 'mcpwrap' && e.phase !== 'in'){ if(e.ms != null) t.ms += e.ms; return; }
     t.calls++;
     if(e.ms != null) t.ms += e.ms;
-    if(e.kind === 'mcp' && e.app && t.apps.indexOf(e.app) < 0) t.apps.push(e.app);
+    if((e.kind === 'mcp' || e.viaGateway) && e.app && t.apps.indexOf(e.app) < 0) t.apps.push(e.app);
     const who = e.under || ROOT_AGENT;
     t.callers.set(who, (t.callers.get(who) || 0) + 1);
     const bag = e.under ? subOf(e.under).tools : rootTools;
@@ -2548,6 +2693,7 @@ function buildOne(traceId, recs){
   const userCodeRec = recs.find(r => r.raw['X-External-User-Code'] || r.raw.userCode);
   const userCode = userCodeRec ? (userCodeRec.raw['X-External-User-Code'] || userCodeRec.raw.userCode) : null;
   const agg = summarize(clean, recs, {userQ: userQ, plan: plan, finalAnswer: finalAnswer,
+    inbound: meta.inbound, agentHidden: meta.agentHidden, gatewaySeen: gwCalls.length > 0,
     delivered: delivered, allAvailable: allAvailable, errs: errs, userCode: userCode,
     answerVia: meta.answerVia, seconds: meta.durationMs / 1000});
 
@@ -2567,6 +2713,7 @@ function buildOne(traceId, recs){
     const segEnd = segEvents.length ? segEvents[segEvents.length - 1].ts : q.ts;
     const view = summarize(segEvents, segRecs, {userQ: q, plan: planEv ? planEv.planData : null,
       finalAnswer: segAnswer, delivered: segDelivered, allAvailable: allAvailable,
+      inbound: meta.inbound, agentHidden: meta.agentHidden, gatewaySeen: gwCalls.length > 0,
       errs: segErrs, userCode: userCode, answerVia: meta.answerVia,
       seconds: Math.max((segEnd - q.ts) / 1000, 0)});
     return {index: i, question: q, findings: view.findings, stats: view.stats,

@@ -24,11 +24,16 @@ function buildSessions(){
   if(STATE._sessFor === STATE.traces) return STATE._sess;
   const map = new Map();
   STATE.traces.forEach((t, ti) => {
-    const qs = (t.userQs && t.userQs.length) ? t.userQs : (t.userQ ? [t.userQ] : []);
+    let qs = (t.userQs && t.userQs.length) ? t.userQs : (t.userQ ? [t.userQ] : []);
     const ctx = t.meta.ctx || {};
+    // the new comod-adapter logs that a message came, not what it said: the message still
+    // belongs in its dialog, with the answer it got
+    if(!qs.length && t.meta.inbound)
+      qs = [{text: '', noText: true, ts: t.meta.inbound.ts, messageId: t.meta.inbound.messageId, cus: ctx.cus,
+             channel: ctx.sourceChannel}];
     const answers = t.events.filter(e => e.kind === 'answer');
     qs.forEach((q, qi) => {
-      if(!q || !q.text || !String(q.text).trim()) return;
+      if(!q || (!q.noText && (!q.text || !String(q.text).trim()))) return;
       // the channel's dialog (AIAD_CHAT: externalSessionId) groups the bot's per-message sessions
       const id = t.meta.channelSession || q.session || (t.userQ && t.userQ.session) || t.meta.sessionGuess || '';
       const key = id || '__none__';
@@ -42,7 +47,7 @@ function buildSessions(){
       const next = qs[qi + 1];
       const ans = answers.filter(e => e.ts >= q.ts && (!next || e.ts < next.ts)).pop();
       const item = {ts: q.ts != null ? q.ts : (t.meta.from ? +t.meta.from : 0), ti: ti, qi: qi, multi: qs.length > 1,
-                    text: String(q.text).trim(), messageId: q.messageId || '',
+                    text: String(q.text || '').trim(), noText: !!q.noText, messageId: q.messageId || '',
                     cus: String(q.cus || ctx.cus || '').trim(),
                     answer: seg ? seg.finalAnswer : t.finalAnswer, parts: seg ? seg.answerParts : t.answerParts,
                     delivered: seg ? seg.delivered : t.delivered, ansTs: ans ? ans.ts : null};
@@ -172,7 +177,8 @@ function renderChat(host, eyebrow, cells, items, breaks){
       '<div class="msg client">' + ids(it) +
         '<div class="mhead"><span class="mwho"' + (it.cus ? ' title="CUS клиента"' : '') + '>' + esc(it.cus || 'Клиент') + '</span>' +
         '<span class="mtime">' + esc(fmtStamp(new Date(it.ts))) + '</span></div>' +
-        '<div class="mtext">' + esc(it.text) + '</div>' +
+        (it.noText ? '<div class="mtext mnotext">текст сообщения в логах не записан — comod-adapter записывает только, что сообщение пришло</div>'
+                   : '<div class="mtext">' + esc(it.text) + '</div>') +
         (others ? '<div class="malso">повторно отправлено — ещё ' + it.also.length + ' traceId: ' + others + '</div>' : '') +
       '</div>';
     const agent = it.answer
@@ -329,7 +335,8 @@ function renderTabs(){
       '<span class="tid">' + esc(l.id) + '</span>' +
       (l.repeat ? '<span class="trep" title="одно и то же обращение, отправленное повторно">' +
                   '↻ ' + esc(l.repeat) + '</span>' : '') +
-      (l.q ? '<span class="tq">- ' + esc(l.q) + '</span>' : '') +
+      (l.q ? '<span class="tq">- ' + esc(l.q) + '</span>' :
+       t.meta.inbound ? '<span class="tq tnotext">- текст сообщения не записан</span>' : '') +
       (l.cus ? '<span class="tcus">- ' + esc(l.cus) + '</span>' : '') +
       (l.fio ? '<span class="tfio">- ' + esc(l.fio) + '</span>' : '') +
     '</span>' +
@@ -695,7 +702,8 @@ function renderReport(){
       '<p class="question">' + (multiQ ? '<span class="q-num">' + (i + 1) + '</span>' : '') +
       '<span class="q-mark">«</span>' + esc(q.text.trim()) + '<span class="q-mark">»</span></p>'
     ).join('') :
-    '<p class="question"><span class="q-mark">«</span>запрос не найден в выгрузке<span class="q-mark">»</span></p>';
+    '<p class="question"><span class="q-mark">«</span>' + (m.inbound ? 'текст сообщения в логах не записан' : 'запрос не найден в выгрузке') +
+    '<span class="q-mark">»</span></p>';
 
   const segTabs = multiQ ?
     '<div class="tabs segtabs" id="segtabs" role="tablist">' +
@@ -902,9 +910,6 @@ function renderReport(){
       '<div class="rawbar">' +
         '<input id="q" placeholder="поиск по тексту сообщения…">' +
         '<select id="fapp"></select><select id="flvl"></select>' +
-        '<span class="rawtools">' +
-          '<button type="button" class="foldbtn" id="rawtoggle">раскрыть/скрыть</button>' +
-        '</span>' +
       '</div><div id="rawtable"></div></details>';
 
   wireContracts(tr, segOf);

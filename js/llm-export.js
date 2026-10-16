@@ -87,7 +87,8 @@ function llmEventLine(e, t0){
   const name = e.name ? ' ' + e.name : '';
   const out = [];
   if(e.kind === 'user'){
-    out.push(at + ' [Запрос клиента] ' + (e.meta ? '(' + e.meta + ') ' : '') + '«' + llmCut(e.quote, 1000) + '»');
+    out.push(at + ' [Запрос клиента] ' + (e.meta ? '(' + e.meta + ') ' : '') +
+      (e.noText ? '— текст в логах не записан' : '«' + llmCut(e.quote, 1000) + '»'));
   } else if(e.kind === 'route'){
     out.push(at + ' [Маршрутизация]' + name + (e.ms != null ? ' · ' + llmMs(e.ms) : '') + (e.meta ? ' · ' + e.meta : ''));
   } else if(e.kind === 'llm'){
@@ -193,7 +194,7 @@ function llmTraceSection(tr, n, opts){
 
   L.push('### Вопрос клиента');
   q.forEach(x => L.push('> ' + String(x.text || '').replace(/\n/g, '\n> ')));
-  if(!q.length) L.push('(в логах не найден)');
+  if(!q.length) L.push(m.inbound ? '(текст в логах не записан: comod-adapter записывает только разделы запроса — ' + (m.inbound.sections || '—') + ')' : '(в логах не найден)');
   L.push('');
 
   const route = llmRoute(tr);
@@ -301,7 +302,7 @@ function llmBuild(scope, key){
     items.forEach(it => {
       if(scope === 'cus' && it.skey !== prev){ L.push('— сессия ' + (it.sid || 'без sessionId') + ' —'); prev = it.skey; }
       const tid = STATE.traces[it.ti].traceId;
-      L.push('- ' + llmTime(it.ts) + ' · клиент' + (it.cus ? ' ' + it.cus : '') + ': «' + llmCut(it.text, 1000) + '» [traceId ' + tid + ']' +
+      L.push('- ' + llmTime(it.ts) + ' · клиент' + (it.cus ? ' ' + it.cus : '') + ': ' + (it.noText ? '(текст в логах не записан)' : '«' + llmCut(it.text, 1000) + '»') + ' [traceId ' + tid + ']' +
              ((it.also || []).length ? ' (отправлено повторно ещё ' + it.also.length + ' раз)' : ''));
       L.push('  ' + (it.answer
         ? (it.ansTs ? llmTime(it.ansTs) + ' · ' : '') + 'агент' + (it.ansTs ? ' (через ' + llmMs(it.ansTs - it.ts) + ')' : '') +
