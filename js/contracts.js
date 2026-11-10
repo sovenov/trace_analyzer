@@ -89,6 +89,16 @@ function extractContracts(recs){
 
   recs.forEach(r => {
     const m = r.msg, app = r.app, raw = r.raw || {};
+    const alfi = extractAlfiEvent(raw);
+    if(alfi){
+      if(alfi.event_id && C.some(c => c.kafka && c.callbackId === alfi.event_id)) return;
+      add({ts: r.ts, kind: 'flow', from: app, to: 'aiagentscn-queue-keeper', method: 'Kafka',
+           endpoint: '', title: 'публикация ' + alfi.data.event_type, event: alfi.data.event_type,
+           kafka: true, alfiJob: alfi.job_id, callbackId: alfi.event_id,
+           status: 'опубликовано', src: app, req: js(raw['extra.alfi_payload_json']),
+           resp: {note: 'событие отправлено в Kafka; это не подтверждение доставки клиенту'}});
+      return;
+    }
 
     // ---------- langflow integration log: "[Target] Request|Response" + structured fields
     let im;
@@ -117,6 +127,8 @@ function extractContracts(recs){
           o.kind = 'mcp'; o.to = usesGateway || /\/gateway\/mcp/i.test(raw.url || raw.path || '') ? 'mcp-gateway' : 'MCP-сервер';
           o.title = 'tools/call ' + (raw.operation || '');
           o.tool = raw.operation || '';
+        } else if(target === 'ARAG Gateway'){
+          o.kind = 'rag'; o.to = 'arag-gateway'; o.title = 'поиск чанков';
         } else if(target === 'Comod Webhook'){
           o.to = 'aiagentscn-queue-keeper'; o.title = 'callback ' + (raw.event_type || '');
           o.event = raw.event_type || '';
@@ -131,6 +143,7 @@ function extractContracts(recs){
           const tg = target === 'MCP' ? {kind: 'mcp', to: usesGateway ? 'mcp-gateway' : 'MCP-сервер', title: 'tools/call ' + (raw.operation || ''), tool: raw.operation || ''}
                    : target === 'AlfaGen API' ? {kind: 'llm', to: 'alfagen-gateway-api (LLM)', title: 'вызов модели', llmId: (raw.message_id || '').toLowerCase()}
                    : target === 'Comod Webhook' ? {kind: 'flow', to: 'aiagentscn-queue-keeper', title: 'callback ' + (raw.event_type || ''), event: raw.event_type || ''}
+                   : target === 'ARAG Gateway' ? {kind: 'rag', to: 'arag-gateway', title: 'поиск чанков'}
                    : target === 'Keycloak' ? {kind: 'auth', to: 'Keycloak', title: 'получение токена'}
                    : target === 'ACCESS' ? {kind: 'flow', to: 'alfagen-langflow', title: 'входящий запрос'}
                    : {kind: 'flow', to: target, title: target};
@@ -438,7 +451,7 @@ function extractContracts(recs){
       const ev = (/type='(\w+)'/.exec(m) || [])[1] || '';
       add({ts: r.ts, kind: 'flow', from: 'alfagen-langflow', to: app, method: 'POST', endpoint: '/api/v1/ai-flow/callback',
            title: 'callback ' + ev.toLowerCase(), event: ev.toLowerCase(), qkEvent: (/eventId='([^']+)'/.exec(m) || [])[1] || '',
-           src: app, dupOfLangflow: true, req: js(body)});
+           src: app, dupOfLangflow: true, alfiJob: (/jobId='([^']+)'/.exec(m) || [])[1] || '', req: js(body)});
       return;
     }
 
@@ -676,6 +689,11 @@ function extractContracts(recs){
     if(c.src === 'alfagen-langflow · ASK LLM' && c.llmId && integ.some(o => o.kind === 'llm' && o.llmId === c.llmId)) drop.add(c);
     if(c.src === 'alfagen-langflow · MCP' && integ.some(o => o.kind === 'mcp' && o.tool === c.tool && near(o, c, 1500))) drop.add(c);
     if(c.dupOfLangflow && integ.some(o => o.to === 'aiagentscn-queue-keeper' && o.event === c.event && near(o, c, 3000))) drop.add(c);
+    if(c.dupOfLangflow && c.alfiJob){
+      const published = C.find(o => o.kafka && o.alfiJob === c.alfiJob && o.event === c.event &&
+        (o.callbackId === c.qkEvent || c.event === 'end') && near(o, c, 3000));
+      if(published){ published.resp = {note: 'публикация в Kafka подтверждена получением события в queue-keeper'}; drop.add(c); }
+    }
     // strategy's own copy of the langflow run, when langflow logged the run itself
     if(c.fromStrategy && C.some(o => o !== c && o.to === 'alfagen-langflow' && /\/run\//.test(o.endpoint || '') &&
                                      o.src.indexOf('alfagen-langflow') === 0 && near(o, c, 3000))) drop.add(c);

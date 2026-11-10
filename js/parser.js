@@ -255,7 +255,12 @@ const LANGFLOW_FLOW = /\/api\/v\d+\/flows\//;
      [ACCESS] -> Response POST <path> -> <code> | headers=… | body={…}
    Everything the caller sent and got back is in there, and for the apo endpoint that is
    the only place either one appears in full. */
-function extractAccess(msg, app){
+function extractAccess(msg, app, raw){
+  if(app === 'alfagen-langflow' && raw && /^\[ACCESS\] (Request|Response)$/.test(msg)){
+    return {phase: msg.slice(9), method: raw.method || 'POST', path: raw.path || raw.url || '',
+            code: raw.status_code == null ? null : +raw.status_code,
+            body: raw.response_body == null ? raw.body : raw.response_body};
+  }
   if(app !== 'alfagen-langflow' || msg.lastIndexOf('[ACCESS]', 0) !== 0) return null;
   const m = /->\s*(Request|Response)\s+([A-Z]+)\s+(\S+)(?:\s*->\s*(\d{3}))?/.exec(msg);
   if(!m) return null;
@@ -544,6 +549,39 @@ function extractRestLlm(msg){
   return out;
 }
 
+/* Integration logs keep timing and payloads in fields rather than in message text. */
+function integrationTiming(raw){
+  const time = v => { const t = v ? Date.parse(v) : NaN; return isNaN(t) ? null : t; };
+  const start = time(raw.operation_start_time), end = time(raw.operation_finish_time);
+  const ms = raw.operation_duration_ms == null ? null : +raw.operation_duration_ms;
+  return {start: start, end: end, ms: ms != null && isFinite(ms) ? ms :
+    (start != null && end != null ? end - start : null)};
+}
+
+function extractApiLlm(msg, raw){
+  if(msg !== '[AlfaGen API] Response' || !raw) return null;
+  const body = safeJson(raw.response_body);
+  if(!body || typeof body !== 'object' ||
+     (!Object.prototype.hasOwnProperty.call(body, 'content') && !Array.isArray(body.tool_calls))) return null;
+  const out = {messageId: raw.message_id || raw.messageId, model: raw.model,
+               content: typeof body.content === 'string' ? body.content : '',
+               toolCalls: [], usage: {}, finish: body.finish_reason || null};
+  (Array.isArray(body.tool_calls) ? body.tool_calls : []).forEach(c => {
+    if(c && c.function && c.function.name) out.toolCalls.push({name: c.function.name,
+      args: typeof c.function.arguments === 'string' ? c.function.arguments : JSON.stringify(c.function.arguments || {})});
+  });
+  ['prompt_tokens', 'completion_tokens', 'total_tokens'].forEach(k => {
+    if(raw[k] != null && isFinite(+raw[k])) out.usage[k] = +raw[k];
+  });
+  return out;
+}
+
+function extractAlfiEvent(raw){
+  if(!raw || raw.app_id !== 'alfagen-langflow' || raw['extra.delivery_status'] !== 'sent') return null;
+  const envelope = safeJson(raw['extra.alfi_payload_json']);
+  return envelope && envelope.data && typeof envelope.data.event_type === 'string' ? envelope : null;
+}
+
 /* Classify an LLM turn by the shape of what it produced. */
 function classifyTurn(turn){
   if(turn.toolCalls.length) return {role: 'Решение вызвать инструмент', tag: 'call'};
@@ -755,7 +793,22 @@ function argPreview(json){
      [MCP -> {http}] | Response | <tool> | body={…}
    The component logs its own Request line for the same call with the bare arguments in
    `body`; only the transport one states the method, which is how the two are told apart. */
-function extractMcpHttp(msg){
+function extractMcpHttp(msg, raw){
+  if(raw && /^\[MCP\] (Request|Response)$/.test(msg)){
+    const phase = msg.slice(6), body = phase === 'Request' ? raw.body : raw.response_body;
+    const o = safeJson(body), method = o && o.method;
+    const name = raw.operation || (o && o.params && o.params.name);
+    if(!name) return null;
+    if(name.indexOf('/') >= 0) return {phase: phase, method: name, protocol: true};
+    if(phase === 'Request' && method !== 'tools/call') return null;
+    const timing = integrationTiming(raw);
+    return {phase: phase, name: name, structured: true, callKey: raw.span_id || raw.spanId || null,
+            args: phase === 'Request' ? JSON.stringify((o.params || {}).arguments || {}) : null,
+            result: phase === 'Response' ? body : null,
+            isError: +raw.status_code >= 400 || !!(o && o.isError),
+            viaGateway: /\/gateway\/mcp/i.test(String(raw.url || raw.path || '')),
+            startTs: timing.start, ms: timing.ms};
+  }
   if(msg.lastIndexOf('[MCP -> {http}]', 0) !== 0) return null;
   const m = /^\[MCP -> \{http\}\]\s*\|\s*(Request|Response)\s*\|\s*([\w.\-\/]+)\s*\|/.exec(msg);
   if(!m) return null;
@@ -767,9 +820,11 @@ function extractMcpHttp(msg){
     const o = safeJson(body);
     if(!o || !o.method) return null;             // the component's copy, without the call
     const args = o.params && o.params.arguments;
-    return {phase: phase, name: name, args: args ? JSON.stringify(args) : '{}'};
+    return {phase: phase, name: name, args: args ? JSON.stringify(args) : '{}',
+            callKey: raw && (raw.span_id || raw.spanId) || null};
   }
   return {phase: phase, name: name, result: body,
+          callKey: raw && (raw.span_id || raw.spanId) || null,
           isError: /"isError"\s*:\s*true/.test(String(body || ''))};
 }
 
@@ -798,7 +853,15 @@ function extractSubAgent(msg){
   return out;
 }
 
-function extractRag(msg){
+function extractRag(msg, raw){
+  if(raw && /^\[ARAG Gateway\] (Request|Response)$/.test(msg)){
+    const request = msg === '[ARAG Gateway] Request';
+    const o = safeJson(request ? raw.body : raw.response_body);
+    if(!o) return null;
+    return request ? {kind: 'request', structured: true, systemId: o.system_id, query: o.query,
+                      filters: JSON.stringify(o.filters || {})} :
+                    {kind: 'response', structured: true, chunks: o.items_count};
+  }
   if(msg.indexOf('[RAG') < 0 && msg.indexOf('чанк') < 0 && msg.indexOf('/chunks') < 0) return null;
   const out = {};
   const q = /Запрос к ARAG:\s*system_id=([\w\-]+),\s*query_len=(\d+),\s*filters=(.+)$/.exec(msg);
@@ -874,10 +937,17 @@ function extractToolKinds(msg){
   return out.length ? out : null;
 }
 
-function extractFinalAnswer(msg, app){
+function extractFinalAnswer(msg, app, raw){
+  const alfi = extractAlfiEvent(raw);
+  if(alfi && alfi.data.event_type === 'add_message'){
+    const text = JSON.stringify(alfi.data.value);
+    if(text && answerParts(text)) return {text: text, session: alfi.session_id,
+      messageId: alfi.data.comod_message_id, ctx: ctxFrom(alfi.data.metadata || {}),
+      published: true, via: 'публикация в Kafka; доставка в канал в этих логах не подтверждена'};
+  }
   // the apo endpoint answers inline: the body the caller got back is the answer, next to
   // the agent that wrote it. A 200 here is also the delivery — there is no channel hop.
-  const ac = extractAccess(msg, app);
+  const ac = extractAccess(msg, app, raw);
   if(ac && ac.phase === 'Response' && ac.code === 200){
     const o = safeJson(ac.body);
     if(o && typeof o.answer === 'string' && o.answer.trim()){
@@ -1339,8 +1409,9 @@ function tokensOf(e){
    LLM: httpx logs "HTTP Response: POST …/chat/completions … 'content-length': 'N'" —
    present only on stacks that call the model from langflow directly. */
 function sizeKey(s){
-  const i = s.indexOf('"text":"');
-  return i < 0 ? '' : s.slice(i + 8, i + 400).replace(/\\+/g, '').replace(/[^0-9A-Za-zА-Яа-яЁё]+/g, '').slice(0, 60);
+  const m = /"text"\s*:\s*"/.exec(s);
+  const i = m ? m.index + m[0].length : -1;
+  return i < 0 ? '' : s.slice(i, i + 392).replace(/\\+/g, '').replace(/[^0-9A-Za-zА-Яа-яЁё]+/g, '').slice(0, 60);
 }
 /* one entry per tools/call result: bytes on the wire, when, and which tool */
 function mcpSizeList(rcs){
@@ -1350,7 +1421,17 @@ function extractSizes(rcs){
   const mcp = [], llm = [], resp = [];
   rcs.forEach(r => {
     const m = r.msg || '';
-    if(m.indexOf('[MCP -> {http}] | ProtocolDiagnostic') === 0){
+    const raw = r.raw || {};
+    if(r.app === 'alfagen-langflow' && m === '[MCP] ProtocolDiagnostic'){
+      const prefix = String(raw.body_prefix || '');
+      const bytes = +raw['response_headers.content-length'];
+      if(/"result"\s*:\s*\{\s*"content"/.test(prefix) && bytes > 0)
+        mcp.push({bytes: bytes, ts: r.ts, key: sizeKey(prefix), callKey: raw.span_id || raw.spanId || null});
+    } else if(r.app === 'alfagen-langflow' && m === '[MCP] Response'){
+      if(raw.operation && raw.operation.indexOf('/') < 0)
+        resp.push({ts: r.ts, name: raw.operation, key: sizeKey(String(raw.response_body || '')),
+                   callKey: raw.span_id || raw.spanId || null});
+    } else if(m.indexOf('[MCP -> {http}] | ProtocolDiagnostic') === 0){
       if(!/"result"\s*:\s*\{\s*"content"/.test(m)) return;
       const c = /"content-length"\s*:\s*"(\d+)"/i.exec(m);
       if(!c) return;
@@ -1367,7 +1448,8 @@ function extractSizes(rcs){
   });
   mcp.forEach(x => {
     const near = resp.filter(y => y.ts >= x.ts - 5 && y.ts - x.ts < 120000);
-    const hit = near.find(y => x.key && y.key === x.key) || near[0];
+    const hit = (x.callKey && resp.find(y => y.callKey === x.callKey)) ||
+                near.find(y => x.key && y.key === x.key) || near[0];
     if(hit) x.tool = hit.name;
   });
   const agg = (xs, extra) => {
@@ -1376,7 +1458,7 @@ function extractSizes(rcs){
             max: top ? Object.assign({bytes: top.bytes, ts: top.ts}, extra(top)) : null};
   };
   const out = {mcp: agg(mcp, x => ({tool: x.tool || ''})), llm: agg(llm, () => ({}))};
-  Object.defineProperty(out, 'mcpList', {value: mcp.map(x => ({bytes: x.bytes, ts: x.ts, tool: x.tool || ''})), enumerable: false});
+  Object.defineProperty(out, 'mcpList', {value: mcp.map(x => ({bytes: x.bytes, ts: x.ts, tool: x.tool || '', callKey: x.callKey})), enumerable: false});
   return out;
 }
 
@@ -1403,6 +1485,7 @@ function mcpBudget(evs, rcs){
     let best = null, bd = Infinity;
     sizes.forEach(x => {
       if(x.used || (x.tool && !sameTool(x.tool, c.name))) return;
+      if(c.callKey && x.callKey && c.callKey !== x.callKey) return;
       const d = Math.abs(x.ts - c.ts);
       if(d < bd){ bd = d; best = x; }
     });
@@ -1574,7 +1657,9 @@ function summarize(evs, rcs, ctx){
   if(delivered) findings.push({level: 'ok', text: ctx.answerVia
     ? 'Ответ отдан вызывающей системе в ответе на запрос (' + escText(ctx.answerVia) + ').'
     : 'Ответ доставлен в чат.'});
-  else if(finalAnswer) findings.push({level: 'note', text: 'Подтверждения доставки в bot-conversation-api нет.'});
+  else if(finalAnswer) findings.push({level: 'note', text: ctx.answerPublished
+    ? 'Ответ опубликован в Kafka; подтверждения доставки в канал в этих логах нет.'
+    : 'Подтверждения доставки в bot-conversation-api нет.'});
   else if(ctx.inbound && !rejects.length) findings.push({level: 'warn', text: 'Ответа агента в этих логах нет.'});
 
   return {
@@ -1651,11 +1736,14 @@ function buildOne(traceId, recs){
   // is a pairing by position, so a row's duration is one of the burst's, not provably its.
   const mcpHttpPending = new Map();
   const httpCalls = [];
+  const structuredRag = recs.filter(r => r.app === 'alfagen-langflow' && r.msg === '[ARAG Gateway] Response')
+    .map(r => ({ts: r.ts, chunks: (safeJson(r.raw.response_body) || {}).items_count}));
   const sysCount = new Map();
   let lfAnswer = null;         // what langflow returned — used only when nothing better was logged
   let inbound = null;          // comod-adapter's one-line inbound record (no message text)
   const gwCalls = [];          // mcp-gateway's view of the agent's tool calls
   const statusSeen = new Set();
+  const publishedEvents = new Set();
   // AIAD_CHAT: the bot opens a session of its own for every message; the dialog the client
   // is in is the channel's one, which langflow passes on as externalSessionId
   const extSess = new Map();
@@ -1710,6 +1798,23 @@ function buildOne(traceId, recs){
         events.push({ts: r.ts, kind: 'status', depth: 0, chip: 'Статус', chipClass: 'c-sys', app: app,
                      title: 'Промежуточное сообщение клиенту',
                      quote: cx.status.split(';').map(x => x.trim()).filter(Boolean).join(' · ')});
+      }
+    }
+    const alfi = extractAlfiEvent(r.raw);
+    if(alfi){
+      meta.ctx = Object.assign(meta.ctx || {}, ctxFrom(alfi.data.metadata || {}));
+      if(alfi.data.event_type === 'add_message'){
+        (function walk(nodes){
+          (nodes || []).forEach(n => {
+            if(!n) return;
+            if(n.type === 'intermediate' && n.body && n.body.text && !statusSeen.has(n.body.text)){
+              statusSeen.add(n.body.text);
+              events.push({ts: r.ts, kind: 'status', depth: 0, chip: 'Статус', chipClass: 'c-sys', app: app,
+                title: 'Промежуточное сообщение опубликовано в Kafka', quote: n.body.text});
+            }
+            if(Array.isArray(n.children)) walk(n.children);
+          });
+        })((alfi.data.value || {}).children);
       }
     }
 
@@ -1796,24 +1901,35 @@ function buildOne(traceId, recs){
       if(!prev) toolKind.set(k.name, k);
       else if(!prev.server && k.server) prev.server = k.server;
     });
-    const off = extractOfferedTools(msg);
+    let off = extractOfferedTools(msg);
+    if(app === 'alfagen-langflow' && msg === '[AlfaGen API] Request'){
+      const body = safeJson(r.raw.body);
+      if(body && Array.isArray(body.tools)) off = {messageId: r.raw.message_id || r.raw.messageId,
+        tools: body.tools.filter(t => t && t.function && t.function.name).map(t => t.function.name), partial: false};
+    }
     if(off) offered.push({ts: r.ts, messageId: off.messageId, tools: off.tools, partial: off.partial});
 
-    // --- LLM turns. Three services log the same turn in three shapes; which of them
-    // is present depends on the stack, so read all three and dedupe by content later.
-    const src = app === 'alfagen-java-functions-service' ? 'java' :
+    // --- LLM turns. Services log the same turn in several shapes; which of them
+    // is present depends on the stack; merge their copies after extraction.
+    const src = app === 'alfagen-langflow' && msg === '[AlfaGen API] Response' ? 'integration' :
+                app === 'alfagen-java-functions-service' ? 'java' :
                 askLlmPhase(msg) ? 'ask' :
                 msg.indexOf('Rest response from LLM:') >= 0 ? 'rest' : null;
     if(src){
-      const turn = src === 'ask' ? askLlmTurn(msg, r) :
+      const turn = src === 'integration' ? extractApiLlm(msg, r.raw) :
+                   src === 'ask' ? askLlmTurn(msg, r) :
                    src === 'rest' ? extractRestLlm(msg) : extractLlmTurn(msg);
       if(turn){
         const cls = classifyTurn(turn);
-        const span = src === 'ask' ? turn.span : seenMsgIds.get(turn.messageId);
+        const timing = src === 'integration' ? integrationTiming(r.raw) : null;
+        const span = timing && timing.start != null
+          ? {start: timing.start, end: timing.end != null ? timing.end : r.ts}
+          : src === 'ask' ? turn.span : seenMsgIds.get(turn.messageId);
         const ev = {ts: r.ts, kind: 'llm', depth: 0, chip: 'Модель', chipClass: 'c-llm',
                     title: cls.role, tag: cls.tag, app: app, model: turn.model,
                     usage: turn.usage, finish: turn.finish, messageId: turn.messageId,
-                    startTs: span ? span.start : r.ts, ms: span ? (span.end - span.start) : null,
+                    startTs: span ? span.start : r.ts,
+                    ms: timing && timing.ms != null ? timing.ms : span ? (span.end - span.start) : null,
                     src: src, content: turn.content,
                     contentKey: turnKey(turn.content), empty: !String(turn.content || '').trim()};
 
@@ -1926,35 +2042,40 @@ function buildOne(traceId, recs){
     }
 
     // --- MCP through the java gateway, as langflow's transport logged it
-    const mh = extractMcpHttp(msg);
+    const mh = app === 'alfagen-langflow' ? extractMcpHttp(msg, r.raw) : extractMcpHttp(msg);
     if(mh && !mh.protocol && mh.name){
       if(mh.phase === 'Request'){
         if(!mcpHttpPending.has(mh.name)) mcpHttpPending.set(mh.name, []);
-        mcpHttpPending.get(mh.name).push({ts: r.ts, args: mh.args});
+        mcpHttpPending.get(mh.name).push({ts: r.ts, args: mh.args, callKey: mh.callKey, structured: mh.structured});
       } else {
         const q = mcpHttpPending.get(mh.name);
-        const req = (q && q.length) ? q.shift() : null;
-        const ms = req ? (r.ts - req.ts) : null;
+        const qi = q && mh.structured && mh.callKey ? q.findIndex(x => x.callKey === mh.callKey) : 0;
+        const req = q && q.length && qi >= 0 ? q.splice(qi, 1)[0] : null;
+        const ms = mh.ms != null ? mh.ms : req ? (r.ts - req.ts) : null;
         httpCalls.push({ts: r.ts, kind: 'mcpwrap', phase: 'in', depth: 2, chip: 'MCP',
                         chipClass: mh.isError ? 'c-err' : 'c-mcp',
                         title: 'Инструмент ', name: mh.name, app: app,
-                        startTs: req ? req.ts : r.ts, ms: ms,
+                        startTs: mh.startTs != null ? mh.startTs : req ? req.ts : r.ts, ms: ms,
+                        structured: mh.structured, callKey: mh.callKey,
                         params: req ? req.args : null,
                         result: mh.isError ? null : mh.result,
                         error: mh.isError ? mh.result : null,
                         meta: [ms != null ? Math.round(ms) + ' мс' : null,
                                req ? argPreview(req.args) : null,
-                               'через MCP-шлюз',
+                               mh.structured && !mh.viaGateway ? 'интеграционный лог Langflow' : 'через MCP-шлюз',
                                mh.isError ? 'инструмент вернул ошибку' : null].filter(Boolean).join(' · ')});
       }
     }
 
     // --- RAG
-    const rg = extractRag(msg);
+    let rg = app === 'alfagen-langflow' ? extractRag(msg, r.raw) : extractRag(msg);
+    if(rg && !rg.structured && rg.kind === 'response' && structuredRag.some(x =>
+      x.chunks === rg.chunks && Math.abs(x.ts - r.ts) < 2000)) rg = null;
     if(rg){
       if(rg.kind === 'request'){
         events.push({ts: r.ts, kind: 'rag', depth: 2, chip: 'RAG', chipClass: 'c-rag',
                      title: 'Запрос в ARAG', app: app,
+                     quote: rg.query,
                      meta: 'system_id=' + rg.systemId + ' · фильтры: ' + (rg.filters || '—'),
                      dedupeKey: 'rag-req:' + r.ts});
       } else if(rg.kind === 'response'){
@@ -1971,7 +2092,11 @@ function buildOne(traceId, recs){
     // --- final answer + delivery
     const lf = extractLangflowRunAnswer(msg, app, r.raw);
     if(lf) lfAnswer = Object.assign({ts: r.ts, app: app}, lf);
-    const fa = extractFinalAnswer(msg, app);
+    let fa = extractFinalAnswer(msg, app, r.raw);
+    if(fa && fa.published && alfi && alfi.event_id){
+      if(publishedEvents.has(alfi.event_id)) fa = null;
+      else publishedEvents.add(alfi.event_id);
+    }
     if(fa && fa.ctx) meta.ctx = Object.assign(meta.ctx || {}, fa.ctx);
     if(fa && fa.messageId) meta.messageId = meta.messageId || fa.messageId;
     if(fa && fa.text && fa.text.trim()){
@@ -1979,9 +2104,11 @@ function buildOne(traceId, recs){
       finalAnswer = humanizeAnswer(fa.text.trim()).trim();
       if(fa.messageId) answerMsgId = fa.messageId;
       if(fa.delivered){ delivered = true; meta.answerVia = fa.via || null; }
+      if(fa.published) meta.answerPublished = true;
       events.push({ts: r.ts, kind: 'answer', depth: 0, chip: 'Ответ', chipClass: 'c-ans',
-                   title: 'Ответ отдан в сессию', parts: faParts, quote: finalAnswer, app: app, full: true,
-                   meta: fa.via || '', deliveredHere: !!fa.delivered});
+                   title: fa.published ? 'Ответ опубликован в Kafka' : 'Ответ отдан в сессию',
+                   parts: faParts, quote: finalAnswer, app: app, full: true,
+                   meta: fa.via || '', deliveredHere: !!fa.delivered, publishedHere: !!fa.published});
     }
     const dl = extractDelivery(msg);
     if(dl){
@@ -2002,7 +2129,7 @@ function buildOne(traceId, recs){
     // --- a run that ended at the http layer: 401/403 turned away at the door, or a 500
     // the flow died with. Either way it is the story of the trace, and the access log
     // carries it at level INFO, where the error section below never looks.
-    const acc = extractAccess(msg, app);
+    const acc = extractAccess(msg, app, r.raw);
     if(acc && acc.phase === 'Response' && acc.code >= 400){
       const det = safeJson(acc.body);
       let detail = det && (det.detail || det.message || det.error);
@@ -2051,14 +2178,35 @@ function buildOne(traceId, recs){
 
   // ---- one row per MCP call, whichever of langflow's two logs saw it ----------------
   // The component wrapper ([TOOL]) and the http transport ([MCP -> {http}]) describe the
-  // same call from two sides. Where the wrapper spoke, its record is already in the
-  // timeline; the transport copy earns a row only where it did not — which is how a call
-  // to a server behind the java gateway becomes visible at all.
+  // same call from two sides. Structured transport records supply arguments and results;
+  // they replace the component wrapper. Legacy transport fills gaps in the wrapper log.
+  mcpHttpPending.forEach((pending, name) => pending.forEach(req => {
+    if(!req.structured) return;
+    httpCalls.push({ts: req.ts, startTs: req.ts, kind: 'mcpwrap', phase: 'in', depth: 2,
+      chip: 'MCP', chipClass: 'c-mcp', title: 'Инструмент ', name: name, app: 'alfagen-langflow',
+      structured: true, callKey: req.callKey, params: req.args, meta: 'ответ в выгрузке не найден'});
+  }));
   const wrapperSeen = events.filter(e => e.kind === 'subagent' || e.kind === 'mcpwrap');
+  const replacedWrappers = new Set();
+  const integrationHttp = httpCalls.filter(h => h.structured);
   httpCalls.forEach(h => {
+    if(h.structured){
+      ['in', 'out'].forEach(phase => {
+        const ts = phase === 'in' ? h.startTs : h.ts;
+        const twin = wrapperSeen.filter(e => !replacedWrappers.has(e) && e.name === h.name && e.phase === phase &&
+          Math.abs(e.ts - ts) < 2000).sort((a, b) => Math.abs(a.ts - ts) - Math.abs(b.ts - ts))[0];
+        if(twin) replacedWrappers.add(twin);
+      });
+      events.push(h);
+      return;
+    }
+    if(integrationHttp.some(e => e.name === h.name && (e.callKey && h.callKey
+      ? e.callKey === h.callKey
+      : Math.abs(e.ts - h.ts) < 1500 && Math.abs(e.startTs - h.startTs) < 50))) return;
     const twin = wrapperSeen.some(e => e.name === h.name && Math.abs(e.ts - h.ts) < 2000);
     if(!twin) events.push(h);
   });
+  for(let i = events.length - 1; i >= 0; i--) if(replacedWrappers.has(events[i])) events.splice(i, 1);
 
   // ---- the agent's work when langflow's own logs are not in the dump -----------------
   // The new stack routes through the orchestrator to a flow whose records may sit under
@@ -2376,11 +2524,12 @@ function buildOne(traceId, recs){
 
   // dedupe repeated langflow/MCP emissions
   // The same model turn can be logged by all three services at once. Keep the richest
-  // copy: java-functions carries tool calls and round-trip timing, the REST mirror
+  // copy: the integration log carries the full response and explicit timing;
+  // java-functions carries tool calls and round-trip timing, the REST mirror
   // carries tool calls and tokens, langflow's [ASK LLM] carries the least. Copies are
   // only ever dropped in favour of a *different*, better source — two turns logged
   // twice by the same service are two real turns.
-  const SRC_RANK = {java: 0, rest: 1, ask: 2};
+  const SRC_RANK = {integration: -1, java: 0, rest: 1, ask: 2};
   const llmTurns = events.filter(e => e.kind === 'llm');
   // masking can still make two copies of one turn read differently past the first few
   // hundred characters; an identical prompt/completion/total token triple settles it
@@ -2389,10 +2538,21 @@ function buildOne(traceId, recs){
     return x.total_tokens > 0 && x.total_tokens === y.total_tokens &&
            x.prompt_tokens === y.prompt_tokens && x.completion_tokens === y.completion_tokens;
   };
-  const twinOf = (o, e) => o !== e && SRC_RANK[o.src] < SRC_RANK[e.src] &&
-    Math.abs(o.ts - e.ts) < 60000 && (o.contentKey === e.contentKey || sameUsage(o, e));
+  const twinOf = (o, e) => {
+    if(o === e || SRC_RANK[o.src] >= SRC_RANK[e.src] || Math.abs(o.ts - e.ts) >= 60000) return false;
+    if(o.src === 'integration' || e.src === 'integration'){
+      if(o.messageId && e.messageId && !/\*/.test(o.messageId + e.messageId))
+        return String(o.messageId).toLowerCase() === String(e.messageId).toLowerCase();
+      return (!!o.contentKey && o.contentKey === e.contentKey) || sameUsage(o, e);
+    }
+    return o.contentKey === e.contentKey || sameUsage(o, e);
+  };
   // the kept copy inherits token counts from a dropped twin when it logged none itself
   llmTurns.forEach(e => {
+    if(e.src === 'integration' && !e.finish){
+      const mirror = llmTurns.find(o => twinOf(e, o) && o.finish);
+      if(mirror) e.finish = mirror.finish;
+    }
     if(e.usage && e.usage.total_tokens) return;
     const w = llmTurns.find(o => twinOf(e, o) && o.usage && o.usage.total_tokens);
     if(w) e.usage = Object.assign({}, w.usage);
@@ -2412,7 +2572,7 @@ function buildOne(traceId, recs){
   // langflow exposes MCP tools as ordinary tools; re-label those so they don't pose as
   // sub-agents. The tool cache is not always in the dump, so a name also counts as MCP
   // when langflow named its server or the adapter logged a call under the same name.
-  const adapterTools = new Set(clean.filter(e => e.kind === 'mcp' && e.name).map(e => e.name));
+  const adapterTools = new Set(clean.filter(e => (e.kind === 'mcp' || (e.kind === 'mcpwrap' && e.structured)) && e.name).map(e => e.name));
   const isMcpName = n => allAvailable.indexOf(n) >= 0 || adapterTools.has(n) ||
                          !!(toolKind.get(n) && toolKind.get(n).mcp);
   clean.forEach(e => {
@@ -2473,6 +2633,7 @@ function buildOne(traceId, recs){
     });
     if(!hit) return;
     wrapped.add(w);
+    if(w.callKey) hit.callKey = w.callKey;
     if(w.phase === 'out' && w.ms != null && hit.wrapMs == null){
       hit.wrapMs = w.ms;
       hit.meta = (hit.meta ? hit.meta + ' · ' : '') + 'через LangFlow ' + Math.round(w.ms) + ' мс';
@@ -2695,7 +2856,7 @@ function buildOne(traceId, recs){
   const agg = summarize(clean, recs, {userQ: userQ, plan: plan, finalAnswer: finalAnswer,
     inbound: meta.inbound, agentHidden: meta.agentHidden, gatewaySeen: gwCalls.length > 0,
     delivered: delivered, allAvailable: allAvailable, errs: errs, userCode: userCode,
-    answerVia: meta.answerVia, seconds: meta.durationMs / 1000});
+    answerVia: meta.answerVia, answerPublished: meta.answerPublished, seconds: meta.durationMs / 1000});
 
   const segments = userQs.map((q, i) => {
     const segEvents = clean.filter(e => segOf(e.ts) === i);
@@ -2714,7 +2875,7 @@ function buildOne(traceId, recs){
     const view = summarize(segEvents, segRecs, {userQ: q, plan: planEv ? planEv.planData : null,
       finalAnswer: segAnswer, delivered: segDelivered, allAvailable: allAvailable,
       inbound: meta.inbound, agentHidden: meta.agentHidden, gatewaySeen: gwCalls.length > 0,
-      errs: segErrs, userCode: userCode, answerVia: meta.answerVia,
+      errs: segErrs, userCode: userCode, answerVia: meta.answerVia, answerPublished: ansEv && ansEv.publishedHere,
       seconds: Math.max((segEnd - q.ts) / 1000, 0)});
     return {index: i, question: q, findings: view.findings, stats: view.stats,
             finalAnswer: segAnswer, answerParts: segParts, delivered: segDelivered};
